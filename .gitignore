@@ -1,0 +1,47 @@
+# 环境变量
+.env
+.env.local
+.env.*.local
+
+# Python 缓存
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# 虚拟环境
+venv/
+.env/
+.venv/
+
+# 日志文件
+*.log
+logs/
+
+# 数据库文件
+data/zvec/
+data/zvec_llm_cache/
+
+# 备份文件
+*.tar.gz
+*.bak
+backups/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# 操作系统
+.DS_Store
+Thumbs.db
+
+# Docker
+docker-compose.override.yml
+
+# 测试覆盖
+htmlcov/
+.coverage
+coverage.xml
