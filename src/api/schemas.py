@@ -12,6 +12,11 @@ class HealthResponse(BaseModel):
     status: str = Field(..., description="服务状态")
     version: str = Field(..., description="版本号")
     timestamp: datetime = Field(..., description="时间戳")
+    zvec_status: str = Field(..., description="Zvec 向量数据库状态")
+    embedding_status: str = Field(..., description="嵌入服务状态")
+    llm_status: str = Field(..., description="LLM 服务状态")
+    cache_status: str = Field(..., description="缓存服务状态")
+    document_count: int = Field(..., description="知识库文档数量")
 
 
 class ChatRequest(BaseModel):

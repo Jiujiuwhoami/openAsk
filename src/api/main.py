@@ -7,11 +7,13 @@
 from contextlib import asynccontextmanager
 from datetime import datetime
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, status
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
-from slowapi.util import get_remote_address
+
+from src.utils.limiter import limiter
 
 from src.api.routes import router
 from src.api.schemas import ErrorResponse
@@ -39,8 +41,6 @@ from src.utils.config import settings
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
-
-limiter = Limiter(key_func=get_remote_address, default_limits=["100/minute"])
 
 
 @asynccontextmanager
@@ -150,9 +150,9 @@ async def app_error_handler(request: Request, exc: AppError):
 
     logger.error(f"应用异常: {exc}", exc_info=True)
 
-    return HTTPException(
+    return JSONResponse(
         status_code=status_code,
-        detail=ErrorResponse(
+        content=ErrorResponse(
             error=exc.__class__.__name__,
             message=str(exc),
             timestamp=datetime.now(),
@@ -164,9 +164,9 @@ async def app_error_handler(request: Request, exc: AppError):
 async def generic_error_handler(request: Request, exc: Exception):
     """全局通用异常处理器。"""
     logger.error(f"未处理异常: {exc}", exc_info=True)
-    return HTTPException(
+    return JSONResponse(
         status_code=500,
-        detail=ErrorResponse(
+        content=ErrorResponse(
             error="InternalServerError",
             message="服务器内部错误，请稍后重试",
             timestamp=datetime.now(),

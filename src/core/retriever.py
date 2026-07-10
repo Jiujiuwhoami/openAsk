@@ -1,6 +1,5 @@
 """检索引擎：编排 RAG 完整流程（嵌入→检索→重排序→生成→缓存）。"""
 
-import asyncio
 from typing import List, Optional
 
 import numpy as np
@@ -113,7 +112,6 @@ class Retriever:
         self._cache_backend = cache_backend
         self._llm_client = llm_client
         self._reranker = reranker
-        self._lock = asyncio.Lock()
 
     async def retrieve(
         self,
@@ -135,72 +133,71 @@ class Retriever:
                 answer="请提供有效的查询内容", sources=[], llm_used=False
             )
 
-        async with self._lock:
-            try:
-                query_vector = await self._encode_query(query)
-            except EmbeddingError as e:
-                logger.error(f"查询编码失败: {e}")
-                return RetrievalResult(
-                    answer="系统暂无法处理该查询，请稍后重试",
-                    sources=[],
-                    llm_used=False,
-                )
-
-            cached_answer = self._check_cache(query_vector)
-            if cached_answer:
-                logger.debug("缓存命中，直接返回")
-                sources = self._get_sources_for_cache(query_vector, top_k)
-                return RetrievalResult(
-                    answer=cached_answer,
-                    sources=sources,
-                    cache_hit=True,
-                    llm_used=False,
-                )
-
-            try:
-                recall_top_k = (
-                    self._reranker.recall_top_k
-                    if self._reranker and self._reranker.is_enabled
-                    else top_k
-                )
-                search_results = self._vector_search(query_vector, recall_top_k)
-            except VectorStoreError as e:
-                logger.error(f"向量检索失败: {e}")
-                return RetrievalResult(
-                    answer="无法检索到相关信息，请稍后重试",
-                    sources=[],
-                    llm_used=False,
-                )
-
-            if not search_results:
-                logger.debug("未检索到相关文档")
-                return RetrievalResult(
-                    answer="未找到相关信息",
-                    sources=[],
-                    llm_used=False,
-                )
-
-            reranked = False
-            if self._reranker and self._reranker.is_enabled:
-                try:
-                    search_results = await self._reranker.rerank(
-                        query, search_results, top_k=top_k
-                    )
-                    reranked = True
-                    logger.debug(f"重排序完成，结果数量: {len(search_results)}")
-                except Exception as e:
-                    logger.warning(f"重排序失败，降级为不重排序: {e}")
-
-            answer = await self._generate_answer(query, search_results)
-            self._cache_result(query_vector, answer)
-
+        try:
+            query_vector = await self._encode_query(query)
+        except EmbeddingError as e:
+            logger.error(f"查询编码失败: {e}")
             return RetrievalResult(
-                answer=answer,
-                sources=search_results,
-                cache_hit=False,
-                llm_used=True,
-                reranked=reranked,
+                answer="系统暂无法处理该查询，请稍后重试",
+                sources=[],
+                llm_used=False,
             )
+
+        cached_answer = self._check_cache(query_vector)
+        if cached_answer:
+            logger.debug("缓存命中，直接返回")
+            sources = self._get_sources_for_cache(query_vector, top_k)
+            return RetrievalResult(
+                answer=cached_answer,
+                sources=sources,
+                cache_hit=True,
+                llm_used=False,
+            )
+
+        try:
+            recall_top_k = (
+                self._reranker.recall_top_k
+                if self._reranker and self._reranker.is_enabled
+                else top_k
+            )
+            search_results = self._vector_search(query_vector, recall_top_k)
+        except VectorStoreError as e:
+            logger.error(f"向量检索失败: {e}")
+            return RetrievalResult(
+                answer="无法检索到相关信息，请稍后重试",
+                sources=[],
+                llm_used=False,
+            )
+
+        if not search_results:
+            logger.debug("未检索到相关文档")
+            return RetrievalResult(
+                answer="未找到相关信息",
+                sources=[],
+                llm_used=False,
+            )
+
+        reranked = False
+        if self._reranker and self._reranker.is_enabled:
+            try:
+                search_results = await self._reranker.rerank(
+                    query, search_results, top_k=top_k
+                )
+                reranked = True
+                logger.debug(f"重排序完成，结果数量: {len(search_results)}")
+            except Exception as e:
+                logger.warning(f"重排序失败，降级为不重排序: {e}")
+
+        answer = await self._generate_answer(query, search_results)
+        self._cache_result(query_vector, answer)
+
+        return RetrievalResult(
+            answer=answer,
+            sources=search_results,
+            cache_hit=False,
+            llm_used=True,
+            reranked=reranked,
+        )
 
     async def _encode_query(self, query: str) -> np.ndarray:
         """将查询文本编码为向量（异步）。"""
@@ -289,13 +286,12 @@ class Retriever:
 
     async def close(self) -> None:
         """异步关闭所有资源。"""
-        with self._lock:
-            if hasattr(self._llm_client, "close"):
-                try:
-                    await self._llm_client.close()
-                except Exception as e:
-                    logger.warning(f"关闭 LLM 客户端失败: {e}")
-            self._vector_store.close()
+        if hasattr(self._llm_client, "close"):
+            try:
+                await self._llm_client.close()
+            except Exception as e:
+                logger.warning(f"关闭 LLM 客户端失败: {e}")
+        self._vector_store.close()
 
     def __enter__(self) -> "Retriever":
         return self

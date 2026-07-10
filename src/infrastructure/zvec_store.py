@@ -271,7 +271,10 @@ class ZvecStore(VectorStore):
             raise VectorStoreError(f"Failed to get document: {e}")
 
     def list(self) -> List[Document]:
-        """列出所有文档。
+        """列出所有文档（按创建时间降序）。
+
+        使用 filter-only 查询（不带向量）获取所有 active 状态的文档，
+        避免零向量查询的不可靠性，分页结果稳定可预测。
 
         线程安全：内部使用 RLock 保护 Zvec 集合操作。
         """
@@ -282,12 +285,8 @@ class ZvecStore(VectorStore):
                 count = self._collection.stats.doc_count
                 if count == 0:
                     return []
-                dummy_vector = np.zeros(self._dimension, dtype=np.float32)
                 results = self._collection.query(
-                    queries=zvec.Query(
-                        field_name="dense_embedding",
-                        vector=dummy_vector,
-                    ),
+                    filter="status == 'active'",
                     topk=min(count, 1000),
                 )
                 for r in results:
@@ -302,6 +301,7 @@ class ZvecStore(VectorStore):
                             updated_at=r.fields.get("updated_at", 0),
                         )
                     )
+                all_docs.sort(key=lambda x: x.created_at, reverse=True)
                 return all_docs
         except Exception as e:
             logger.error(f"列出文档失败: {e}", exc_info=True)

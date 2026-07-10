@@ -57,6 +57,7 @@ class ApiSettings(BaseSettings):
     port: int = 8000
     workers: int = 4
     cors_origins: List[str] = Field(default_factory=lambda: ["http://localhost:3000", "http://localhost:8000"])
+    api_key: str = ""
 
     @field_validator("cors_origins", mode="before")
     @classmethod

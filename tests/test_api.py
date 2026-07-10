@@ -157,9 +157,30 @@ class MockDocument:
             setattr(self, key, value)
 
 
+class MockVectorStore:
+    """Mock VectorStore 用于测试。"""
+    def count(self):
+        return 0
+
+class MockEmbeddingService:
+    """Mock EmbeddingService 用于测试。"""
+    def dimension(self):
+        return 768
+
+class MockLLMClient:
+    """Mock LLMClient 用于测试。"""
+    def __init__(self):
+        self._api_key = "test_key"
+
+class MockCacheBackend:
+    """Mock CacheBackend 用于测试。"""
+    pass
+
+
 @pytest.fixture
 def client():
     """创建测试客户端，使用 Mock 组件，完全绕过真实 lifespan。"""
+    from src.utils.limiter import limiter
     test_app = FastAPI(
         title="Zvec Test",
         version="1.0.0",
@@ -167,6 +188,11 @@ def client():
 
     test_app.state.retriever = MockRetriever()
     test_app.state.knowledge_service = MockKnowledgeService()
+    test_app.state.vector_store = MockVectorStore()
+    test_app.state.embedding_service = MockEmbeddingService()
+    test_app.state.llm_client = MockLLMClient()
+    test_app.state.cache_backend = MockCacheBackend()
+    test_app.state.limiter = limiter
 
     test_app.include_router(router)
 
@@ -185,6 +211,11 @@ class TestHealthEndpoint:
         assert data["status"] == "healthy"
         assert data["version"] == "1.0.0"
         assert "timestamp" in data
+        assert data["zvec_status"] == "healthy"
+        assert data["embedding_status"] == "healthy"
+        assert data["llm_status"] == "healthy"
+        assert data["cache_status"] == "healthy"
+        assert data["document_count"] == 0
 
 
 class TestChatEndpoint:

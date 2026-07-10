@@ -221,6 +221,11 @@ class SenseNovaClient:
         prompt = PromptBuilder.build_qa_prompt(query, context)
         return await self.complete(prompt)
 
+    @property
+    def is_configured(self) -> bool:
+        """返回 API 密钥是否已配置。"""
+        return bool(self._api_key)
+
     def get_token_stats(self) -> Dict[str, int]:
         """获取 Token 使用统计。"""
         return self._token_monitor.get_stats()

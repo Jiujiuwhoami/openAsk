@@ -1,7 +1,6 @@
 """知识库业务服务：编排文档加载→切分→嵌入→存储的完整流程（异步）。"""
 
 import os
-import threading
 import uuid
 from typing import List, Optional
 
@@ -51,7 +50,6 @@ class KnowledgeService:
         self._loader_factory = DocumentLoaderFactory()
         self._splitter_faq = DocumentSplitter(NoSplitStrategy())
         self._splitter_long = DocumentSplitter(RecursiveSplitStrategy())
-        self._lock = threading.RLock()
 
     def load_document(self, file_path: str) -> DomainDocument:
         """加载单个文档文件，转换为领域模型（同步，文件 IO 很快）。
@@ -108,9 +106,8 @@ class KnowledgeService:
             source=source,
         )
 
-        with self._lock:
-            embedding = await self._embedding_service.encode(doc.content)
-            self._vector_store.insert(doc, embedding)
+        embedding = await self._embedding_service.encode(doc.content)
+        self._vector_store.insert(doc, embedding)
 
         logger.info(f"文档已创建并存储: {doc.title} ({doc.doc_id})")
         return doc
@@ -126,9 +123,8 @@ class KnowledgeService:
         """
         doc = self.load_document(file_path)
 
-        with self._lock:
-            embedding = await self._embedding_service.encode(doc.content)
-            self._vector_store.insert(doc, embedding)
+        embedding = await self._embedding_service.encode(doc.content)
+        self._vector_store.insert(doc, embedding)
 
         logger.info(f"文档已加载并存储: {doc.title} ({doc.doc_id})")
         return doc
@@ -161,10 +157,9 @@ class KnowledgeService:
             return []
 
         contents = [doc.content for doc in docs_to_store]
-        with self._lock:
-            embeddings = await self._embedding_service.encode_batch(contents)
-            for i, doc in enumerate(docs_to_store):
-                self._vector_store.insert(doc, embeddings[i])
+        embeddings = await self._embedding_service.encode_batch(contents)
+        for i, doc in enumerate(docs_to_store):
+            self._vector_store.insert(doc, embeddings[i])
 
         logger.info(f"FAQ 文档加载完成，共 {len(docs_to_store)} 条")
         return docs_to_store
@@ -227,10 +222,9 @@ class KnowledgeService:
             return []
 
         contents = [doc.content for doc in docs_to_store]
-        with self._lock:
-            embeddings = await self._embedding_service.encode_batch(contents)
-            for i, doc in enumerate(docs_to_store):
-                self._vector_store.insert(doc, embeddings[i])
+        embeddings = await self._embedding_service.encode_batch(contents)
+        for i, doc in enumerate(docs_to_store):
+            self._vector_store.insert(doc, embeddings[i])
 
         logger.info(f"目录文档加载完成，共 {len(docs_to_store)} 条")
         return docs_to_store
@@ -248,8 +242,7 @@ class KnowledgeService:
 
     def count_documents(self) -> int:
         """返回当前知识库文档总数（同步）。"""
-        with self._lock:
-            return self._vector_store.count()
+        return self._vector_store.count()
 
     def get_by_id(self, doc_id: str) -> Optional[DomainDocument]:
         """根据文档 ID 获取文档（同步，向量操作很快）。
@@ -260,9 +253,7 @@ class KnowledgeService:
         Returns:
             DomainDocument 实例或 None
         """
-        with self._lock:
-            doc = self._vector_store.get(doc_id)
-        return doc
+        return self._vector_store.get(doc_id)
 
     def list_documents(self, page: int = 1, page_size: int = 10) -> List[DomainDocument]:
         """分页列出所有文档（同步，向量操作很快）。
@@ -274,11 +265,10 @@ class KnowledgeService:
         Returns:
             文档列表
         """
-        with self._lock:
-            all_docs = self._vector_store.list()
-            start = (page - 1) * page_size
-            end = start + page_size
-            return all_docs[start:end]
+        all_docs = self._vector_store.list()
+        start = (page - 1) * page_size
+        end = start + page_size
+        return all_docs[start:end]
 
     async def search(self, query: str, top_k: int = 5) -> List[DomainDocument]:
         """检索知识库，返回最相似的文档（异步）。
@@ -290,9 +280,8 @@ class KnowledgeService:
         Returns:
             匹配的文档列表（按相似度排序）
         """
-        with self._lock:
-            embedding = await self._embedding_service.encode(query)
-            results = self._vector_store.search(embedding, top_k=top_k)
+        embedding = await self._embedding_service.encode(query)
+        results = self._vector_store.search(embedding, top_k=top_k)
 
         docs = []
         for result in results:
