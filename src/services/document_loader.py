@@ -3,7 +3,6 @@
 import os
 from typing import Optional, Type
 
-from langchain_text_splitters import RecursiveCharacterTextSplitter
 from pypdf import PdfReader
 
 from src.domain.exceptions import KnowledgeBaseError

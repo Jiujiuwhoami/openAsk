@@ -5,6 +5,7 @@
 
 # Python 缓存
 __pycache__/
+.pytest_cache/
 *.py[cod]
 *$py.class
 *.so
