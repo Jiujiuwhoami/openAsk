@@ -1,5 +1,6 @@
 """检索引擎：编排 RAG 完整流程（嵌入→检索→重排序→生成→缓存）。"""
 
+import asyncio
 from typing import List, Optional
 
 import numpy as np
@@ -297,11 +298,9 @@ class Retriever:
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
-        import asyncio
-
         try:
             loop = asyncio.get_running_loop()
-            loop.create_task(self.close())
+            if loop.is_running():
+                loop.create_task(self.close())
         except RuntimeError:
-            # 无运行中的事件循环，同步关闭
             asyncio.run(self.close())
