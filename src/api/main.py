@@ -59,21 +59,17 @@ _request_count_lock = asyncio.Lock()
 def create_llm_client() -> LLMClient:
     """创建 LLM 客户端实例。
 
-    根据配置选择 LLM 提供商,目前仅支持 SenseNova。
-    未来可扩展为:
-    - openai
-    - tongyi
-    - etc.
+    使用 LLM_* 环境变量配置，兼容所有 OpenAI 格式的 API。
+    只需修改 .env 中的 LLM_API_BASE / LLM_API_KEY / LLM_MODEL 即可切换：
+
+    - OpenAI:    https://api.openai.com/v1
+    - 通义千问:  https://dashscope.aliyuncs.com/compatible-mode/v1
+    - DeepSeek:  https://api.deepseek.com
+    - SenseNova: https://api.sensenova.cn/v1
 
     Returns:
         LLMClient: LLM 客户端实例
     """
-    provider = getattr(settings, "llm", {}).get("provider", "sensenova") if hasattr(settings, "llm") else "sensenova"
-
-    if provider == "sensenova":
-        return SenseNovaClient()
-
-    logger.warning(f"未知 LLM 提供商: {provider}，回退到 SenseNovaClient")
     return SenseNovaClient()
 
 

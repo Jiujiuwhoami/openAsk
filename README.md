@@ -41,7 +41,7 @@ cd openAsk
 
 # 2. 配置环境变量
 cp .env.example .env
-# 编辑 .env，填入 SENSE_NOVA_API_KEY
+# 编辑 .env，填入 LLM_API_KEY
 
 # 3. 一键启动
 docker compose up -d
@@ -78,7 +78,7 @@ python -m pip install -r requirements.txt
 
 ```powershell
 copy .env.example .env
-# 编辑 .env，填入 SENSE_NOVA_API_KEY 等配置
+# 编辑 .env，填入 LLM_API_KEY 等配置
 ```
 
 #### 4. 初始化知识库（导入 FAQ 文档）
@@ -135,7 +135,7 @@ pip install -r requirements.txt
 
 ```bash
 cp .env.example .env
-# 编辑 .env，填入 SENSE_NOVA_API_KEY 等配置
+# 编辑 .env，填入 LLM_API_KEY 等配置
 ```
 
 #### 5. 初始化知识库

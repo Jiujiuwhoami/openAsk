@@ -5,7 +5,7 @@
 
 使用方式：
     from src.utils.config import settings
-    api_key = settings.sense_nova.api_key
+    api_key = settings.llm.api_key
 """
 
 from typing import List, Optional
@@ -14,14 +14,14 @@ from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
-class SenseNovaSettings(BaseSettings):
-    """SenseNova API 配置。"""
+class LLMSettings(BaseSettings):
+    """LLM API 配置（兼容 OpenAI 接口格式）。"""
 
-    model_config = SettingsConfigDict(env_prefix="SENSE_NOVA_", extra="ignore")
+    model_config = SettingsConfigDict(env_prefix="LLM_", extra="ignore")
 
     api_key: str = ""
-    api_base: str = "https://api.sensenova.cn/v1"
-    model: str = "default"
+    api_base: str = "https://api.openai.com/v1"
+    model: str = "gpt-4o-mini"
     timeout: int = 30
     max_retries: int = 3
 
@@ -148,7 +148,7 @@ class Settings(BaseSettings):
     environment: str = "development"
     debug: bool = False
 
-    sense_nova: SenseNovaSettings = Field(default_factory=SenseNovaSettings)
+    llm: LLMSettings = Field(default_factory=LLMSettings)
     zvec: ZvecSettings = Field(default_factory=ZvecSettings)
     embedding: EmbeddingSettings = Field(default_factory=EmbeddingSettings)
     api: ApiSettings = Field(default_factory=ApiSettings)
@@ -166,7 +166,7 @@ settings = Settings()
 __all__ = [
     "settings",
     "Settings",
-    "SenseNovaSettings",
+    "LLMSettings",
     "ZvecSettings",
     "EmbeddingSettings",
     "ApiSettings",

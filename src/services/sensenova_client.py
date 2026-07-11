@@ -112,11 +112,11 @@ class SenseNovaClient(LLMClient):
         timeout: Optional[int] = None,
         max_retries: Optional[int] = None,
     ):
-        self._api_key = api_key or settings.sense_nova.api_key
-        self._api_base = api_base or settings.sense_nova.api_base
-        self._model = model or settings.sense_nova.model
-        self._timeout = timeout or settings.sense_nova.timeout
-        self._max_retries = max_retries or settings.sense_nova.max_retries
+        self._api_key = api_key or settings.llm.api_key
+        self._api_base = api_base or settings.llm.api_base
+        self._model = model or settings.llm.model
+        self._timeout = timeout or settings.llm.timeout
+        self._max_retries = max_retries or settings.llm.max_retries
         self._token_monitor = TokenMonitor()
         self._lock = threading.RLock()
         self._async_client: Optional[httpx.AsyncClient] = None
