@@ -46,9 +46,9 @@ python -m pip install -r requirements.txt
 在项目根目录创建 `.env` 文件：
 
 ```env
-# SenseNova API 配置
-SENSE_NOVA_API_KEY=your_api_key_here
-SENSE_NOVA_API_BASE=https://api.sensenova.cn/v1
+# LLM API 配置（兼容 OpenAI 格式）
+LLM_API_KEY=your_api_key_here
+LLM_API_BASE=https://api.openai.com/v1
 
 # Zvec 配置
 ZVEC_DATA_PATH=data/zvec
@@ -73,8 +73,8 @@ RATE_LIMIT_STORAGE_URI=memory://
 
 | 变量名 | 说明 | 开发默认值 |
 |--------|------|------------|
-| SENSE_NOVA_API_KEY | SenseNova API 密钥 | - |
-| SENSE_NOVA_API_BASE | SenseNova API 基础 URL | https://api.sensenova.cn/v1 |
+| LLM_API_KEY | LLM API 密钥 | - |
+| LLM_API_BASE | LLM API 基础 URL | https://api.openai.com/v1 |
 | ZVEC_DATA_PATH | Zvec 数据存储路径 | data/zvec |
 | ZVEC_DIMENSION | 向量维度 | 384 |
 | API_HOST | API 服务绑定地址 | 127.0.0.1 |
@@ -217,9 +217,9 @@ nano .env
 填入以下内容：
 
 ```env
-# SenseNova API 配置
-SENSE_NOVA_API_KEY=your_api_key_here
-SENSE_NOVA_API_BASE=https://api.sensenova.cn/v1
+# LLM API 配置（兼容 OpenAI 格式）
+LLM_API_KEY=your_api_key_here
+LLM_API_BASE=https://api.openai.com/v1
 
 # Zvec 配置
 ZVEC_DATA_PATH=/opt/OpenAsk/data/zvec
@@ -285,7 +285,7 @@ services:
     ports:
       - "8000:8000"
     environment:
-      - SENSE_NOVA_API_KEY=${SENSE_NOVA_API_KEY}
+      - LLM_API_KEY=${LLM_API_KEY}
       - ZVEC_DATA_PATH=/app/data/zvec
       - LOG_FILE=/app/logs/app.log
     volumes:
@@ -604,7 +604,7 @@ python -c "from src.core.zvec_client import ZvecClient; client = ZvecClient(); p
 curl -I https://api.sensenova.cn
 
 # 检查 API Key
-grep SENSE_NOVA_API_KEY /opt/OpenAsk/.env
+grep LLM_API_KEY /opt/OpenAsk/.env
 
 # 查看错误日志
 grep -i "sensenova" /opt/OpenAsk/logs/app.log
