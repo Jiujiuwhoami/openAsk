@@ -1,5 +1,6 @@
 """LLM 响应缓存测试。"""
 
+import tempfile
 import numpy as np
 import pytest
 
@@ -8,7 +9,10 @@ from src.infrastructure.llm_response_cache import LLMResponseCache
 
 @pytest.fixture
 def cache():
-    return LLMResponseCache(maxsize=100, ttl=3600, threshold=0.95)
+    tmpdir = tempfile.mkdtemp()
+    cache_instance = LLMResponseCache(maxsize=100, ttl=3600, threshold=0.95, cache_path=tmpdir)
+    yield cache_instance
+    cache_instance.close()
 
 
 class TestLLMResponseCache:
@@ -48,9 +52,13 @@ class TestLLMResponseCache:
 
     def test_ttl_expiration(self, cache):
         """TTL 过期后缓存应失效。"""
-        short_cache = LLMResponseCache(maxsize=10, ttl=1, threshold=0.95)
-        vec = np.random.rand(384).astype(np.float32)
-        short_cache.set(vec, "will expire")
-        import time
-        time.sleep(1.5)
-        assert short_cache.get(vec) is None
+        tmpdir = tempfile.mkdtemp()
+        short_cache = LLMResponseCache(maxsize=10, ttl=1, threshold=0.95, cache_path=tmpdir)
+        try:
+            vec = np.random.rand(384).astype(np.float32)
+            short_cache.set(vec, "will expire")
+            import time
+            time.sleep(1.5)
+            assert short_cache.get(vec) is None
+        finally:
+            short_cache.close()

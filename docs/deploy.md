@@ -26,8 +26,8 @@ python --version
 
 ```powershell
 cd d:\AgentTest
-git clone <repository-url> Zvec
-cd Zvec
+git clone https://github.com/jiujiuyao/OpenAsk.git OpenAsk
+cd OpenAsk
 ```
 
 #### 安装依赖
@@ -193,7 +193,7 @@ sudo apt install python3.11 python3.11-venv python3.11-dev
 #### 创建虚拟环境
 
 ```bash
-cd /opt/Zvec
+cd /opt/OpenAsk
 python3.11 -m venv venv
 source venv/bin/activate
 ```
@@ -222,7 +222,7 @@ SENSE_NOVA_API_KEY=your_api_key_here
 SENSE_NOVA_API_BASE=https://api.sensenova.cn/v1
 
 # Zvec 配置
-ZVEC_DATA_PATH=/opt/Zvec/data/zvec
+ZVEC_DATA_PATH=/opt/OpenAsk/data/zvec
 ZVEC_DIMENSION=384
 
 # FastAPI 配置
@@ -231,7 +231,7 @@ API_PORT=8000
 
 # 日志配置
 LOG_LEVEL=INFO
-LOG_FILE=/opt/Zvec/logs/app.log
+LOG_FILE=/opt/OpenAsk/logs/app.log
 
 # 限流配置
 RATE_LIMIT_PER_USER=60/minute
@@ -319,19 +319,19 @@ docker-compose down
 
 #### 创建服务文件
 
-创建 `/etc/systemd/system/zvec-service.service`：
+创建 `/etc/systemd/system/openask-service.service`：
 
 ```ini
 [Unit]
-Description=Zvec Customer Service API
+Description=OpenAsk Customer Service API
 After=network.target
 
 [Service]
-User=zvec
-Group=zvec
-WorkingDirectory=/opt/Zvec
-Environment="PATH=/opt/Zvec/venv/bin"
-ExecStart=/opt/Zvec/venv/bin/gunicorn src.api.main:app \
+User=openask
+Group=openask
+WorkingDirectory=/opt/OpenAsk
+Environment="PATH=/opt/OpenAsk/venv/bin"
+ExecStart=/opt/OpenAsk/venv/bin/gunicorn src.api.main:app \
     --workers 4 \
     --worker-class uvicorn.workers.UvicornWorker \
     --bind 0.0.0.0:8000 \
@@ -428,10 +428,10 @@ print('Field added successfully')
 
 ```bash
 # 创建备份目录
-mkdir -p /opt/Zvec/backups
+mkdir -p /opt/OpenAsk/backups
 
 # 备份 Zvec 数据
-tar -czvf /opt/Zvec/backups/zvec_backup_$(date +%Y%m%d).tar.gz /opt/Zvec/data/zvec/
+tar -czvf /opt/OpenAsk/backups/zvec_backup_$(date +%Y%m%d).tar.gz /opt/OpenAsk/data/zvec/
 ```
 
 #### 定时备份（cron）
@@ -444,10 +444,10 @@ crontab -e
 
 ```
 # 每天凌晨 2 点备份
-0 2 * * * cd /opt/Zvec && tar -czvf backups/zvec_backup_$(date +\%Y\%m\%d).tar.gz data/zvec/
+0 2 * * * cd /opt/OpenAsk && tar -czvf backups/zvec_backup_$(date +\%Y\%m\%d).tar.gz data/zvec/
 
 # 每周日凌晨 3 点优化集合
-0 3 * * 0 cd /opt/Zvec && python -c "from src.infrastructure.zvec_store import ZvecStore; ZvecStore().optimize()"
+0 3 * * 0 cd /opt/OpenAsk && python -c "from src.infrastructure.zvec_store import ZvecStore; ZvecStore().optimize()"
 ```
 
 #### 备份策略
@@ -463,7 +463,7 @@ crontab -e
 
 ```bash
 # 恢复 Zvec 数据
-tar -xzvf backups/zvec_backup_20240101.tar.gz -C /opt/Zvec
+tar -xzvf backups/zvec_backup_20240101.tar.gz -C /opt/OpenAsk
 ```
 
 ### 7. 监控与日志
@@ -473,7 +473,7 @@ tar -xzvf backups/zvec_backup_20240101.tar.gz -C /opt/Zvec
 创建 `/etc/logrotate.d/zvec-service`：
 
 ```
-/opt/Zvec/logs/app.log {
+/opt/OpenAsk/logs/app.log {
     daily
     rotate 7
     compress
@@ -488,13 +488,13 @@ tar -xzvf backups/zvec_backup_20240101.tar.gz -C /opt/Zvec
 
 ```bash
 # 查看最近日志
-tail -n 100 /opt/Zvec/logs/app.log
+tail -n 100 /opt/OpenAsk/logs/app.log
 
 # 查看错误日志
-grep -i "error" /opt/Zvec/logs/app.log
+grep -i "error" /opt/OpenAsk/logs/app.log
 
 # 实时监控日志
-tail -f /opt/Zvec/logs/app.log
+tail -f /opt/OpenAsk/logs/app.log
 ```
 
 #### Prometheus 监控（可选）
@@ -562,7 +562,7 @@ python -m pip install --no-cache-dir -r requirements.txt
 
 ```powershell
 # 确保在项目根目录运行
-cd d:\AgentTest\Zvec
+cd d:\AgentTest\OpenAsk
 
 # 使用模块方式启动
 python -m uvicorn src.api.main:app --reload
@@ -580,7 +580,7 @@ sudo netstat -tlnp | grep 8000
 pip list | grep -E "fastapi|uvicorn"
 
 # 检查环境变量
-cat /opt/Zvec/.env
+cat /opt/OpenAsk/.env
 
 # 查看详细错误
 journalctl -u zvec-service -n 50
@@ -590,7 +590,7 @@ journalctl -u zvec-service -n 50
 
 ```bash
 # 检查目录权限
-ls -la /opt/Zvec/data/zvec/
+ls -la /opt/OpenAsk/data/zvec/
 
 # 检查数据库状态
 source venv/bin/activate
@@ -604,10 +604,10 @@ python -c "from src.core.zvec_client import ZvecClient; client = ZvecClient(); p
 curl -I https://api.sensenova.cn
 
 # 检查 API Key
-grep SENSE_NOVA_API_KEY /opt/Zvec/.env
+grep SENSE_NOVA_API_KEY /opt/OpenAsk/.env
 
 # 查看错误日志
-grep -i "sensenova" /opt/Zvec/logs/app.log
+grep -i "sensenova" /opt/OpenAsk/logs/app.log
 ```
 
 ### 紧急恢复流程
@@ -623,7 +623,7 @@ grep -i "sensenova" /opt/Zvec/logs/app.log
 3. **恢复备份**
    ```bash
    # Linux
-   tar -xzvf backups/zvec_backup_latest.tar.gz -C /opt/Zvec
+   tar -xzvf backups/zvec_backup_latest.tar.gz -C /opt/OpenAsk
    ```
 
 4. **启动服务**
@@ -738,4 +738,4 @@ pip install --upgrade fastapi uvicorn
 
 **文档版本**: v1.5  
 **最后更新**: 2026-07-01  
-**适用范围**: Zvec + 独立站客服项目
+**适用范围**: OpenAsk 智能客服项目

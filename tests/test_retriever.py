@@ -46,7 +46,7 @@ class TestRetriever:
         )
 
         vector_store = Mock()
-        vector_store.search.return_value = [
+        vector_store.asearch = AsyncMock(return_value=[
             SearchResult(
                 doc_id="doc1",
                 score=0.95,
@@ -59,11 +59,11 @@ class TestRetriever:
                 content="另一篇相关文档",
                 title="文档标题2",
             ),
-        ]
+        ])
 
         cache_backend = Mock()
-        cache_backend.get.return_value = None
-        cache_backend.set.return_value = None
+        cache_backend.aget = AsyncMock(return_value=None)
+        cache_backend.aset = AsyncMock(return_value=None)
 
         llm_client = Mock()
         llm_client.generate_answer = AsyncMock(
@@ -106,7 +106,7 @@ class TestRetriever:
     async def test_cache_hit(self):
         """测试缓存命中。"""
         embedding_service, vector_store, cache_backend, llm_client, _ = self._create_mocks()
-        cache_backend.get.return_value = "缓存的回答"
+        cache_backend.aget.return_value = "缓存的回答"
 
         retriever = Retriever(embedding_service, vector_store, cache_backend, llm_client)
         result = await retriever.retrieve("测试查询")
@@ -122,7 +122,7 @@ class TestRetriever:
     async def test_cache_miss(self):
         """测试缓存未命中，正常流程。"""
         embedding_service, vector_store, cache_backend, llm_client, _ = self._create_mocks()
-        cache_backend.get.return_value = None
+        cache_backend.aget.return_value = None
 
         retriever = Retriever(embedding_service, vector_store, cache_backend, llm_client)
         result = await retriever.retrieve("测试查询")
@@ -133,13 +133,13 @@ class TestRetriever:
         assert result.llm_used
         assert not result.reranked
         llm_client.generate_answer.assert_called_once()
-        cache_backend.set.assert_called_once()
+        cache_backend.aset.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_cache_failure_degrade(self):
         """测试缓存查询失败，降级为直接检索。"""
         embedding_service, vector_store, cache_backend, llm_client, _ = self._create_mocks()
-        cache_backend.get.side_effect = Exception("缓存服务不可用")
+        cache_backend.aget.side_effect = Exception("缓存服务不可用")
 
         retriever = Retriever(embedding_service, vector_store, cache_backend, llm_client)
         result = await retriever.retrieve("测试查询")
@@ -168,8 +168,8 @@ class TestRetriever:
     async def test_vector_search_failure(self):
         """测试向量检索失败。"""
         embedding_service, vector_store, cache_backend, llm_client, _ = self._create_mocks()
-        cache_backend.get.return_value = None
-        vector_store.search.side_effect = VectorStoreError("向量库不可用")
+        cache_backend.aget.return_value = None
+        vector_store.asearch.side_effect = VectorStoreError("向量库不可用")
 
         retriever = Retriever(embedding_service, vector_store, cache_backend, llm_client)
         result = await retriever.retrieve("测试查询")
@@ -184,8 +184,8 @@ class TestRetriever:
     async def test_no_search_results(self):
         """测试未检索到任何文档。"""
         embedding_service, vector_store, cache_backend, llm_client, _ = self._create_mocks()
-        cache_backend.get.return_value = None
-        vector_store.search.return_value = []
+        cache_backend.aget.return_value = None
+        vector_store.asearch.return_value = []
 
         retriever = Retriever(embedding_service, vector_store, cache_backend, llm_client)
         result = await retriever.retrieve("测试查询")
@@ -200,7 +200,7 @@ class TestRetriever:
     async def test_llm_failure_degrade(self):
         """测试 LLM 调用失败，降级为返回原始文档。"""
         embedding_service, vector_store, cache_backend, llm_client, _ = self._create_mocks()
-        cache_backend.get.return_value = None
+        cache_backend.aget.return_value = None
         llm_client.generate_answer.side_effect = SenseNovaAPIError("LLM 服务不可用")
 
         retriever = Retriever(embedding_service, vector_store, cache_backend, llm_client)
@@ -217,7 +217,7 @@ class TestRetriever:
     async def test_llm_exception_degrade(self):
         """测试 LLM 调用抛出未知异常，降级为返回原始文档。"""
         embedding_service, vector_store, cache_backend, llm_client, _ = self._create_mocks()
-        cache_backend.get.return_value = None
+        cache_backend.aget.return_value = None
         llm_client.generate_answer.side_effect = Exception("网络超时")
 
         retriever = Retriever(embedding_service, vector_store, cache_backend, llm_client)
@@ -231,8 +231,8 @@ class TestRetriever:
     async def test_cache_write_failure(self):
         """测试缓存写入失败（不影响主流程）。"""
         embedding_service, vector_store, cache_backend, llm_client, _ = self._create_mocks()
-        cache_backend.get.return_value = None
-        cache_backend.set.side_effect = Exception("缓存写入失败")
+        cache_backend.aget.return_value = None
+        cache_backend.aset.side_effect = Exception("缓存写入失败")
 
         retriever = Retriever(embedding_service, vector_store, cache_backend, llm_client)
         result = await retriever.retrieve("测试查询")
@@ -247,7 +247,7 @@ class TestRetriever:
         embedding_service, vector_store, cache_backend, llm_client, reranker = self._create_mocks(
             with_reranker=True
         )
-        cache_backend.get.return_value = None
+        cache_backend.aget.return_value = None
 
         retriever = Retriever(
             embedding_service, vector_store, cache_backend, llm_client, reranker=reranker
@@ -265,7 +265,7 @@ class TestRetriever:
         embedding_service, vector_store, cache_backend, llm_client, reranker = self._create_mocks(
             with_reranker=True
         )
-        cache_backend.get.return_value = None
+        cache_backend.aget.return_value = None
         reranker.rerank.side_effect = Exception("重排序服务不可用")
 
         retriever = Retriever(
@@ -284,7 +284,7 @@ class TestRetriever:
             with_reranker=True
         )
         reranker.is_enabled = False
-        cache_backend.get.return_value = None
+        cache_backend.aget.return_value = None
 
         retriever = Retriever(
             embedding_service, vector_store, cache_backend, llm_client, reranker=reranker

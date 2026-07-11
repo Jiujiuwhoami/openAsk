@@ -14,14 +14,17 @@ class Document:
         title: str = "",
         tags: Optional[List[str]] = None,
         source: Optional[str] = None,
+        created_at: Optional[int] = None,
+        updated_at: Optional[int] = None,
     ):
         self._doc_id = doc_id
         self._content = content
         self._title = title
         self._tags = tags or []
         self._source = source
-        self._created_at = int(time.time())
-        self._updated_at = self._created_at
+        now = int(time.time())
+        self._created_at = created_at if created_at is not None else now
+        self._updated_at = updated_at if updated_at is not None else now
 
     @property
     def doc_id(self) -> str:

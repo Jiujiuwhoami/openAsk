@@ -15,8 +15,12 @@ FAQ_DIR = "data/documents/faq"
 def mock_services():
     """创建 mock 的 vector_store 和 embedding_service。"""
     mock_vector_store = Mock()
-    mock_vector_store.count.return_value = 0
-    mock_vector_store.insert.return_value = None
+    mock_vector_store.acount = AsyncMock(return_value=0)
+    mock_vector_store.ainsert = AsyncMock(return_value=None)
+    mock_vector_store.adelete = AsyncMock(return_value=False)
+    mock_vector_store.asearch = AsyncMock(return_value=[])
+    mock_vector_store.aget = AsyncMock(return_value=None)
+    mock_vector_store.alist_paginated = AsyncMock(return_value=[])
 
     mock_embedding_service = Mock()
     mock_embedding_service.encode = AsyncMock(return_value=[0.1] * 384)
@@ -25,19 +29,21 @@ def mock_services():
     return mock_vector_store, mock_embedding_service
 
 
-def test_count_documents(mock_services):
+@pytest.mark.asyncio
+async def test_count_documents(mock_services):
     """测试文档计数。"""
     mock_vector_store, mock_embedding_service = mock_services
-    mock_vector_store.count.return_value = 5
+    mock_vector_store.acount.return_value = 5
 
     svc = KnowledgeService(mock_vector_store, mock_embedding_service)
-    count = svc.count_documents()
+    count = await svc.count_documents()
 
     assert count == 5
-    mock_vector_store.count.assert_called_once()
+    mock_vector_store.acount.assert_called_once()
 
 
-def test_load_document(mock_services):
+@pytest.mark.asyncio
+async def test_load_document(mock_services):
     """测试加载文档。"""
     if not os.path.exists(FAQ_DIR):
         pytest.skip("FAQ 目录不存在")
@@ -49,7 +55,7 @@ def test_load_document(mock_services):
     assert len(faq_files) > 0
 
     file_path = os.path.join(FAQ_DIR, faq_files[0])
-    doc = svc.load_document(file_path)
+    doc = await svc.load_document(file_path)
 
     assert isinstance(doc, Document)
     assert doc.doc_id is not None
@@ -72,19 +78,20 @@ async def test_load_and_store_document(mock_services):
 
     assert isinstance(doc, Document)
     mock_embedding_service.encode.assert_called_once()
-    mock_vector_store.insert.assert_called_once()
+    mock_vector_store.ainsert.assert_called_once()
 
 
-def test_delete_document(mock_services):
+@pytest.mark.asyncio
+async def test_delete_document(mock_services):
     """测试删除文档。"""
     mock_vector_store, mock_embedding_service = mock_services
-    mock_vector_store.delete.return_value = True
+    mock_vector_store.adelete.return_value = True
 
     svc = KnowledgeService(mock_vector_store, mock_embedding_service)
-    result = svc.delete_document("test-doc-id")
+    result = await svc.delete_document("test-doc-id")
 
     assert result is True
-    mock_vector_store.delete.assert_called_once_with("test-doc-id")
+    mock_vector_store.adelete.assert_called_once_with("test-doc-id")
 
 
 @pytest.mark.asyncio
@@ -93,7 +100,7 @@ async def test_search(mock_services):
     from src.domain.models import SearchResult
 
     mock_vector_store, mock_embedding_service = mock_services
-    mock_vector_store.search.return_value = [
+    mock_vector_store.asearch.return_value = [
         SearchResult(doc_id="doc1", score=0.95, content="测试内容", title="测试标题")
     ]
 
@@ -103,7 +110,7 @@ async def test_search(mock_services):
     assert len(results) == 1
     assert isinstance(results[0], Document)
     mock_embedding_service.encode.assert_called_once_with("测试查询")
-    mock_vector_store.search.assert_called_once()
+    mock_vector_store.asearch.assert_called_once()
 
 
 @pytest.mark.asyncio

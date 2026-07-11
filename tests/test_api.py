@@ -56,6 +56,24 @@ class MockRetriever:
         """模拟检索（异步）。"""
         return self._build_result(query, top_k)
 
+    async def retrieve_stream(self, query: str, top_k: int = 5):
+        """模拟流式检索（异步生成器）。"""
+        result = self._build_result(query, top_k)
+        sources_data = [
+            {
+                "doc_id": s.doc_id,
+                "title": s.title,
+                "content": s.content,
+                "score": round(s.score, 4),
+            }
+            for s in result.sources
+        ]
+        yield {"event": "sources", "data": sources_data}
+        yield {"event": "cache_hit", "data": result.cache_hit}
+        for ch in result.answer:
+            yield {"event": "answer_delta", "data": ch}
+        yield {"event": "done", "data": {"reranked": False}}
+
     async def close(self):
         """模拟关闭（异步）。"""
         pass
@@ -106,8 +124,8 @@ class MockKnowledgeService:
         self._documents[doc_id] = doc
         return doc
 
-    def get_by_id(self, doc_id):
-        """模拟根据 ID 获取文档。"""
+    async def get_by_id(self, doc_id):
+        """模拟根据 ID 获取文档（异步）。"""
         return self._documents.get(doc_id)
 
     async def search(self, query: str, top_k: int = 10):
@@ -116,26 +134,54 @@ class MockKnowledgeService:
             return [self._documents[query]]
         return []
 
-    def delete_document(self, doc_id: str):
-        """模拟删除文档。"""
+    async def batch_search(self, queries: list, top_k: int = 10):
+        """模拟批量搜索（异步）。"""
+        results = []
+        for query in queries:
+            if query in self._documents:
+                results.append([self._documents[query]])
+            else:
+                results.append([])
+        return results
+
+    async def delete_document(self, doc_id: str):
+        """模拟删除文档（异步）。"""
         if doc_id in self._documents:
             del self._documents[doc_id]
             return True
         return False
 
-    def count_documents(self):
-        """模拟统计文档数量。"""
+    async def count_documents(self):
+        """模拟统计文档数量（异步）。"""
         return len(self._documents)
 
-    def list_documents(self, page=1, page_size=10):
-        """模拟分页列出文档。"""
+    async def list_documents(self, page=1, page_size=10):
+        """模拟分页列出文档（异步）。"""
         all_docs = list(self._documents.values())
         start = (page - 1) * page_size
         end = start + page_size
         return all_docs[start:end]
 
-    def close(self):
-        """模拟关闭。"""
+    async def update_document(self, doc_id, title=None, content=None, tags=None, source=None):
+        """模拟更新文档（异步）。"""
+        if doc_id not in self._documents:
+            from src.domain.exceptions import DocumentNotFoundError
+            raise DocumentNotFoundError(f"文档不存在: {doc_id}")
+        
+        doc = self._documents[doc_id]
+        if title is not None:
+            doc.title = title
+        if content is not None:
+            doc.content = content
+        if tags is not None:
+            doc.tags = tags
+        if source is not None:
+            doc.source = source
+        doc.updated_at = 1234567891
+        return doc
+
+    async def close(self):
+        """模拟关闭（异步）。"""
         pass
 
 
@@ -161,16 +207,39 @@ class MockVectorStore:
     """Mock VectorStore 用于测试。"""
     def count(self):
         return 0
+    async def acount(self):
+        return 0
+
 
 class MockEmbeddingService:
     """Mock EmbeddingService 用于测试。"""
     def dimension(self):
         return 768
 
+
 class MockLLMClient:
     """Mock LLMClient 用于测试。"""
     def __init__(self):
         self._api_key = "test_key"
+
+    @property
+    def is_configured(self) -> bool:
+        """模拟 API 密钥是否已配置。"""
+        return bool(self._api_key)
+
+    async def generate_answer(self, query: str, context: list) -> str:
+        """模拟生成回答。"""
+        return "Mock LLM 回答"
+
+    async def stream_answer(self, query: str, context: list):
+        """模拟流式生成回答。"""
+        for ch in "Mock LLM 回答":
+            yield ch
+
+    async def close(self):
+        """模拟关闭。"""
+        pass
+
 
 class MockCacheBackend:
     """Mock CacheBackend 用于测试。"""
@@ -182,7 +251,7 @@ def client():
     """创建测试客户端，使用 Mock 组件，完全绕过真实 lifespan。"""
     from src.utils.limiter import limiter
     test_app = FastAPI(
-        title="Zvec Test",
+        title="OpenAsk Test",
         version="1.0.0",
     )
 
@@ -338,3 +407,30 @@ class TestKnowledgeEndpoints:
         assert "items" in data
         assert len(data["items"]) == 3
         assert data["total"] == 3
+
+    def test_update_document(self, client):
+        """测试更新文档。"""
+        create_response = client.post(
+            "/api/knowledge",
+            json={"title": "原始标题", "content": "原始内容"},
+        )
+        doc_id = create_response.json()["doc_id"]
+
+        update_response = client.put(
+            f"/api/knowledge/{doc_id}",
+            json={"title": "更新后的标题", "tags": ["updated"]},
+        )
+        assert update_response.status_code == 200
+        data = update_response.json()
+        assert data["doc_id"] == doc_id
+        assert data["title"] == "更新后的标题"
+        assert data["content"] == "原始内容"
+        assert data["tags"] == ["updated"]
+
+    def test_update_document_not_found(self, client):
+        """测试更新不存在的文档。"""
+        response = client.put(
+            "/api/knowledge/nonexistent",
+            json={"title": "新标题"},
+        )
+        assert response.status_code == 404

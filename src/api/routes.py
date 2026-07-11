@@ -1,10 +1,12 @@
 """API 路由定义。"""
 
+import json
 import os
 import tempfile
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Request
+from fastapi.responses import StreamingResponse
 
 from src.utils.limiter import limiter
 from src.api.schemas import (
@@ -12,8 +14,11 @@ from src.api.schemas import (
     ChatResponse,
     Source,
     DocumentRequest,
+    UpdateDocumentRequest,
     DocumentResponse,
     SearchRequest,
+    BatchSearchRequest,
+    BatchSearchResultItem,
     SearchResultResponse,
     PaginatedResponse,
     HealthResponse,
@@ -48,7 +53,10 @@ async def health_check(request: Request):
 
     try:
         vector_store = request.app.state.vector_store
-        document_count = vector_store.count()
+        if hasattr(vector_store, "acount"):
+            document_count = await vector_store.acount()
+        else:
+            document_count = vector_store.count()
     except Exception as e:
         zvec_status = f"unhealthy: {str(e)[:50]}"
         overall_status = "degraded"
@@ -101,6 +109,7 @@ async def get_knowledge_service(request: Request):
 @router.post("/chat", response_model=ChatResponse)
 @limiter.limit("60/minute")
 async def chat(
+    request: Request,
     body: ChatRequest,
     retriever=Depends(get_retriever),
     _=Depends(verify_api_key),
@@ -132,9 +141,50 @@ async def chat(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.post("/chat/stream")
+@limiter.limit("60/minute")
+async def chat_stream(
+    request: Request,
+    body: ChatRequest,
+    retriever=Depends(get_retriever),
+    _=Depends(verify_api_key),
+):
+    """流式聊天接口：逐事件返回回答（SSE 格式）。
+
+    事件类型:
+      - sources: 来源文档列表
+      - cache_hit: 是否命中缓存
+      - answer_delta: 回答文本增量
+      - done: 流式结束，data 为 {"reranked": bool}
+      - error: 错误信息
+    """
+
+    async def event_generator():
+        try:
+            async for event in retriever.retrieve_stream(
+                query=body.query,
+                top_k=body.top_k,
+            ):
+                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+        except Exception as e:
+            yield f"data: {json.dumps({'event': 'error', 'data': str(e)}, ensure_ascii=False)}\n\n"
+            yield f"data: {json.dumps({'event': 'done', 'data': None}, ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
 @router.post("/knowledge", response_model=DocumentResponse)
 @limiter.limit("30/minute")
 async def create_document(
+    request: Request,
     body: DocumentRequest,
     knowledge_service=Depends(get_knowledge_service),
     _=Depends(verify_api_key),
@@ -168,6 +218,7 @@ ALLOWED_EXTENSIONS = {".md", ".txt", ".pdf", ".docx", ".html"}
 @router.post("/knowledge/upload")
 @limiter.limit("10/minute")
 async def upload_document(
+    request: Request,
     file: UploadFile = File(...),
     knowledge_service=Depends(get_knowledge_service),
     _=Depends(verify_api_key),
@@ -224,7 +275,7 @@ async def get_document(
 ):
     """获取文档接口。"""
     try:
-        doc = knowledge_service.get_by_id(doc_id)
+        doc = await knowledge_service.get_by_id(doc_id)
         if not doc:
             raise DocumentNotFoundError(f"文档不存在: {doc_id}")
         return DocumentResponse(
@@ -242,6 +293,41 @@ async def get_document(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.put("/knowledge/{doc_id}", response_model=DocumentResponse)
+@limiter.limit("30/minute")
+async def update_document(
+    request: Request,
+    doc_id: str,
+    body: UpdateDocumentRequest,
+    knowledge_service=Depends(get_knowledge_service),
+    _=Depends(verify_api_key),
+):
+    """更新文档接口。"""
+    try:
+        doc = await knowledge_service.update_document(
+            doc_id=doc_id,
+            title=body.title,
+            content=body.content,
+            tags=body.tags,
+            source=body.source,
+        )
+        return DocumentResponse(
+            doc_id=doc.doc_id,
+            title=doc.title,
+            content=doc.content,
+            tags=doc.tags,
+            source=doc.source,
+            created_at=doc.created_at,
+            updated_at=doc.updated_at,
+        )
+    except DocumentNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except KnowledgeBaseError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.delete("/knowledge/{doc_id}", response_model=DeleteResponse)
 async def delete_document(
     doc_id: str,
@@ -250,7 +336,7 @@ async def delete_document(
 ):
     """删除文档接口。"""
     try:
-        success = knowledge_service.delete_document(doc_id)
+        success = await knowledge_service.delete_document(doc_id)
         if success:
             return DeleteResponse(success=True, message="删除成功")
         else:
@@ -262,6 +348,7 @@ async def delete_document(
 @router.post("/search", response_model=list[SearchResultResponse])
 @limiter.limit("60/minute")
 async def search(
+    request: Request,
     body: SearchRequest,
     knowledge_service=Depends(get_knowledge_service),
     _=Depends(verify_api_key),
@@ -285,6 +372,42 @@ async def search(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.post("/search/batch", response_model=list[BatchSearchResultItem])
+@limiter.limit("30/minute")
+async def batch_search(
+    request: Request,
+    body: BatchSearchRequest,
+    knowledge_service=Depends(get_knowledge_service),
+    _=Depends(verify_api_key),
+):
+    """批量搜索接口。"""
+    try:
+        batch_results = await knowledge_service.batch_search(
+            queries=body.queries,
+            top_k=body.top_k,
+        )
+        items = []
+        for i, (query, results) in enumerate(zip(body.queries, batch_results)):
+            items.append(
+                BatchSearchResultItem(
+                    query_index=i,
+                    query=query,
+                    results=[
+                        SearchResultResponse(
+                            doc_id=r.doc_id,
+                            title=r.title,
+                            content=r.content[:500] + "..." if len(r.content) > 500 else r.content,
+                            score=round(r.score, 4) if hasattr(r, "score") else 0.0,
+                        )
+                        for r in results
+                    ],
+                )
+            )
+        return items
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.get("/knowledge", response_model=PaginatedResponse)
 async def list_documents(
     page: int = 1,
@@ -294,8 +417,8 @@ async def list_documents(
 ):
     """列出文档接口（分页）。"""
     try:
-        docs = knowledge_service.list_documents(page=page, page_size=page_size)
-        total = knowledge_service.count_documents()
+        docs = await knowledge_service.list_documents(page=page, page_size=page_size)
+        total = await knowledge_service.count_documents()
         items = [
             DocumentResponse(
                 doc_id=d.doc_id,

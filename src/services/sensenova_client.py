@@ -2,11 +2,12 @@
 
 import json
 import threading
-from typing import Dict, List, Optional
+from typing import AsyncGenerator, Dict, List, Optional
 
 import httpx
 
 from src.domain.exceptions import SenseNovaAPIError
+from src.infrastructure.interfaces.llm_client import LLMClient
 from src.utils.config import settings
 from src.utils.logger import get_logger
 from src.utils.retry import retry_with_backoff
@@ -88,8 +89,8 @@ class TokenMonitor:
         }
 
 
-class SenseNovaClient:
-    """SenseNova API 客户端（异步）。
+class SenseNovaClient(LLMClient):
+    """SenseNova API 客户端（异步），实现 LLMClient 接口。
 
     负责与 SenseNova API 进行交互，封装了：
     - Prompt 构建（PromptBuilder）
@@ -124,9 +125,15 @@ class SenseNovaClient:
             logger.warning("SenseNova API Key 未配置，API 调用可能失败")
 
     def _get_client(self) -> httpx.AsyncClient:
-        """获取或创建异步客户端。"""
+        """获取或创建异步客户端（线程安全）。
+
+        使用双重检查锁定模式：先在锁外快速检查，获取锁后再次检查，
+        避免每次调用都获取锁，同时保证线程安全。
+        """
         if self._async_client is None:
-            self._async_client = httpx.AsyncClient(timeout=self._timeout)
+            with self._lock:
+                if self._async_client is None:
+                    self._async_client = httpx.AsyncClient(timeout=self._timeout)
         return self._async_client
 
     def _build_payload(
@@ -220,6 +227,78 @@ class SenseNovaClient:
         """根据上下文生成回答（异步）。"""
         prompt = PromptBuilder.build_qa_prompt(query, context)
         return await self.complete(prompt)
+
+    async def stream_answer(
+        self, query: str, context: List[str]
+    ) -> AsyncGenerator[str, None]:
+        """流式生成回答（异步生成器）。
+
+        使用 SSE（Server-Sent Events）协议逐 token 返回文本增量。
+        兼容 OpenAI 格式的流式响应。
+
+        Args:
+            query: 用户查询
+            context: 上下文片段列表
+
+        Yields:
+            回答文本增量（通常是 token 级别）
+        """
+        if not self._api_key:
+            raise SenseNovaAPIError("SenseNova API Key 未配置")
+
+        prompt = PromptBuilder.build_qa_prompt(query, context)
+        url = f"{self._api_base}/chat/completions"
+        payload = self._build_payload(prompt)
+        payload["stream"] = True
+        headers = self._build_headers()
+
+        prompt_tokens = 0
+        completion_tokens = 0
+
+        try:
+            client = self._get_client()
+            async with client.stream("POST", url, headers=headers, json=payload) as resp:
+                if resp.status_code != 200:
+                    body = await resp.aread()
+                    raise SenseNovaAPIError(
+                        f"流式 API 请求失败: {resp.status_code} - {body.decode()}"
+                    )
+
+                buffer = ""
+                async for line in resp.aiter_lines():
+                    line = line.strip()
+                    if not line:
+                        continue
+                    if line.startswith("data:"):
+                        data_str = line[5:].strip()
+                        if data_str == "[DONE]":
+                            break
+                        try:
+                            data = json.loads(data_str)
+                            choices = data.get("choices", [])
+                            if choices:
+                                delta = choices[0].get("delta", {})
+                                content = delta.get("content", "")
+                                if content:
+                                    completion_tokens += 1
+                                    yield content
+                            usage = data.get("usage")
+                            if usage:
+                                prompt_tokens = usage.get("prompt_tokens", 0)
+                                completion_tokens = usage.get("completion_tokens", completion_tokens)
+                        except json.JSONDecodeError:
+                            continue
+
+            with self._lock:
+                if prompt_tokens == 0:
+                    prompt_tokens = len(prompt) // 4
+                self._token_monitor.record(prompt_tokens, completion_tokens)
+
+            logger.debug(f"SenseNova 流式调用完成，返回约 {completion_tokens} tokens")
+        except httpx.HTTPError as e:
+            raise SenseNovaAPIError(f"流式 HTTP 请求失败: {e}")
+        except Exception as e:
+            raise SenseNovaAPIError(f"流式生成失败: {e}")
 
     @property
     def is_configured(self) -> bool:

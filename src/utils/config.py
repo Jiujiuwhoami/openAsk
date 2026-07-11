@@ -144,7 +144,7 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    app_name: str = "Zvec"
+    app_name: str = "OpenAsk"
     environment: str = "development"
     debug: bool = False
 

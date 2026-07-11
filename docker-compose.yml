@@ -1,0 +1,22 @@
+services:
+  openask:
+    build: .
+    container_name: openask
+    ports:
+      - "${API_PORT:-8000}:8000"
+    env_file:
+      - .env
+    environment:
+      - API_HOST=0.0.0.0
+    volumes:
+      # 数据持久化（挂载父目录，zvec 自己创建子目录）
+      - ./data:/app/data
+      # 日志持久化
+      - ./logs:/app/logs
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s

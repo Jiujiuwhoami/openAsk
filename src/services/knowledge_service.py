@@ -1,12 +1,13 @@
 """知识库业务服务：编排文档加载→切分→嵌入→存储的完整流程（异步）。"""
 
+import asyncio
 import os
 import uuid
 from typing import List, Optional
 
 from langchain_core.documents import Document
 
-from src.domain.models import Document as DomainDocument
+from src.domain.models import Document as DomainDocument, SearchResult
 from src.domain.exceptions import KnowledgeBaseError
 from src.infrastructure.embedding_service import SentenceBertEmbeddingService
 from src.infrastructure.zvec_store import ZvecStore
@@ -32,12 +33,12 @@ class KnowledgeService:
     1. 文档加载（DocumentLoaderFactory）
     2. 文档切分（DocumentSplitter）
     3. 向量嵌入（EmbeddingService，异步批量）
-    4. 向量存储（VectorStore）
+    4. 向量存储（VectorStore，异步）
 
     Examples:
         >>> svc = KnowledgeService()
         >>> await svc.load_faq_documents()
-        >>> count = svc.count_documents()
+        >>> count = await svc.count_documents()
     """
 
     def __init__(
@@ -51,15 +52,12 @@ class KnowledgeService:
         self._splitter_faq = DocumentSplitter(NoSplitStrategy())
         self._splitter_long = DocumentSplitter(RecursiveSplitStrategy())
 
-    def load_document(self, file_path: str) -> DomainDocument:
-        """加载单个文档文件，转换为领域模型（同步，文件 IO 很快）。
+    async def load_document(self, file_path: str) -> DomainDocument:
+        """加载单个文档文件，转换为领域模型（异步）。"""
+        return await asyncio.to_thread(self._load_document_sync, file_path)
 
-        Args:
-            file_path: 文档文件路径
-
-        Returns:
-            DomainDocument 实例
-        """
+    def _load_document_sync(self, file_path: str) -> DomainDocument:
+        """加载单个文档文件（同步）。"""
         loader = self._loader_factory.get_loader(file_path)
         langchain_docs = loader.load()
 
@@ -87,17 +85,7 @@ class KnowledgeService:
         tags: Optional[List[str]] = None,
         source: Optional[str] = None,
     ) -> DomainDocument:
-        """从文本创建文档并存储到向量库（异步）。
-
-        Args:
-            title: 文档标题
-            content: 文档内容
-            tags: 标签列表
-            source: 来源
-
-        Returns:
-            存储后的 DomainDocument 实例
-        """
+        """从文本创建文档并存储到向量库（异步）。"""
         doc = DomainDocument(
             doc_id=str(uuid.uuid4()),
             content=content,
@@ -107,37 +95,60 @@ class KnowledgeService:
         )
 
         embedding = await self._embedding_service.encode(doc.content)
-        self._vector_store.insert(doc, embedding)
+        await self._vector_store.ainsert(doc, embedding)
 
         logger.info(f"文档已创建并存储: {doc.title} ({doc.doc_id})")
         return doc
 
+    async def update_document(
+        self,
+        doc_id: str,
+        title: Optional[str] = None,
+        content: Optional[str] = None,
+        tags: Optional[List[str]] = None,
+        source: Optional[str] = None,
+    ) -> DomainDocument:
+        """更新文档（异步）。"""
+        existing_doc = await self._vector_store.aget(doc_id)
+        if not existing_doc:
+            raise KnowledgeBaseError(f"文档不存在: {doc_id}")
+
+        if content is None:
+            content = existing_doc.content
+        if title is None:
+            title = existing_doc.title
+        if tags is None:
+            tags = existing_doc.tags
+        if source is None:
+            source = existing_doc.source
+
+        updated_doc = DomainDocument(
+            doc_id=doc_id,
+            content=content,
+            title=title,
+            tags=tags,
+            source=source,
+            created_at=existing_doc.created_at,
+        )
+
+        embedding = await self._embedding_service.encode(content)
+        await self._vector_store.aupsert(updated_doc, embedding)
+
+        logger.info(f"文档已更新: {doc_id}")
+        return updated_doc
+
     async def load_and_store_document(self, file_path: str) -> DomainDocument:
-        """加载文档并存储到向量库（异步）。
-
-        Args:
-            file_path: 文档文件路径
-
-        Returns:
-            存储后的 DomainDocument 实例
-        """
-        doc = self.load_document(file_path)
+        """加载文档并存储到向量库（异步）。"""
+        doc = await self.load_document(file_path)
 
         embedding = await self._embedding_service.encode(doc.content)
-        self._vector_store.insert(doc, embedding)
+        await self._vector_store.ainsert(doc, embedding)
 
         logger.info(f"文档已加载并存储: {doc.title} ({doc.doc_id})")
         return doc
 
     async def load_faq_documents(self) -> List[DomainDocument]:
-        """加载所有 FAQ 文档并存储到向量库（异步批量）。
-
-        FAQ 文档使用 NoSplitStrategy（不切分），保持文档完整性。
-        使用批量嵌入提升性能。
-
-        Returns:
-            已存储的文档列表
-        """
+        """加载所有 FAQ 文档并存储到向量库（异步批量）。"""
         if not os.path.exists(FAQ_DIR):
             raise KnowledgeBaseError(f"FAQ 目录不存在: {FAQ_DIR}")
 
@@ -147,7 +158,7 @@ class KnowledgeService:
                 continue
             file_path = os.path.join(FAQ_DIR, filename)
             try:
-                doc = self.load_document(file_path)
+                doc = await self.load_document(file_path)
                 docs_to_store.append(doc)
                 logger.debug(f"FAQ 文档已加载: {filename}")
             except Exception as e:
@@ -159,7 +170,7 @@ class KnowledgeService:
         contents = [doc.content for doc in docs_to_store]
         embeddings = await self._embedding_service.encode_batch(contents)
         for i, doc in enumerate(docs_to_store):
-            self._vector_store.insert(doc, embeddings[i])
+            await self._vector_store.ainsert(doc, embeddings[i])
 
         logger.info(f"FAQ 文档加载完成，共 {len(docs_to_store)} 条")
         return docs_to_store
@@ -167,17 +178,7 @@ class KnowledgeService:
     async def load_directory(
         self, dir_path: str, split_long_docs: bool = True
     ) -> List[DomainDocument]:
-        """加载目录下所有支持的文档并存储到向量库（异步批量）。
-
-        使用批量嵌入提升性能。
-
-        Args:
-            dir_path: 目录路径
-            split_long_docs: 是否切分长文档
-
-        Returns:
-            已存储的文档列表
-        """
+        """加载目录下所有支持的文档并存储到向量库（异步批量）。"""
         if not os.path.exists(dir_path):
             raise KnowledgeBaseError(f"目录不存在: {dir_path}")
 
@@ -191,10 +192,10 @@ class KnowledgeService:
 
             try:
                 loader = self._loader_factory.get_loader(file_path)
-                langchain_docs = loader.load()
+                langchain_docs = await asyncio.to_thread(loader.load)
 
                 if split_long_docs:
-                    langchain_docs = self._splitter_long.split(langchain_docs)
+                    langchain_docs = await asyncio.to_thread(self._splitter_long.split, langchain_docs)
 
                 for langchain_doc in langchain_docs:
                     content = langchain_doc.page_content
@@ -224,83 +225,80 @@ class KnowledgeService:
         contents = [doc.content for doc in docs_to_store]
         embeddings = await self._embedding_service.encode_batch(contents)
         for i, doc in enumerate(docs_to_store):
-            self._vector_store.insert(doc, embeddings[i])
+            await self._vector_store.ainsert(doc, embeddings[i])
 
         logger.info(f"目录文档加载完成，共 {len(docs_to_store)} 条")
         return docs_to_store
 
-    def delete_document(self, doc_id: str) -> bool:
-        """删除指定文档（同步，向量操作很快）。
+    async def delete_document(self, doc_id: str) -> bool:
+        """删除指定文档（异步）。"""
+        return await self._vector_store.adelete(doc_id)
 
-        Args:
-            doc_id: 文档 ID
+    async def count_documents(self) -> int:
+        """返回当前知识库文档总数（异步）。"""
+        return await self._vector_store.acount()
 
-        Returns:
-            删除是否成功
+    async def get_by_id(self, doc_id: str) -> Optional[DomainDocument]:
+        """根据文档 ID 获取文档（异步）。"""
+        return await self._vector_store.aget(doc_id)
+
+    async def list_documents(self, page: int = 1, page_size: int = 10) -> List[DomainDocument]:
+        """分页列出所有文档（异步）。
+
+        使用 ZvecStore 的分页查询方法，避免加载全部文档到内存。
         """
-        return self._vector_store.delete(doc_id)
+        return await self._vector_store.alist_paginated(page=page, page_size=page_size)
 
-    def count_documents(self) -> int:
-        """返回当前知识库文档总数（同步）。"""
-        return self._vector_store.count()
-
-    def get_by_id(self, doc_id: str) -> Optional[DomainDocument]:
-        """根据文档 ID 获取文档（同步，向量操作很快）。
-
-        Args:
-            doc_id: 文档 ID
-
-        Returns:
-            DomainDocument 实例或 None
-        """
-        return self._vector_store.get(doc_id)
-
-    def list_documents(self, page: int = 1, page_size: int = 10) -> List[DomainDocument]:
-        """分页列出所有文档（同步，向量操作很快）。
-
-        Args:
-            page: 页码（从1开始）
-            page_size: 每页数量
-
-        Returns:
-            文档列表
-        """
-        all_docs = self._vector_store.list()
-        start = (page - 1) * page_size
-        end = start + page_size
-        return all_docs[start:end]
-
-    async def search(self, query: str, top_k: int = 5) -> List[DomainDocument]:
-        """检索知识库，返回最相似的文档（异步）。
-
-        Args:
-            query: 查询文本
-            top_k: 返回数量
-
-        Returns:
-            匹配的文档列表（按相似度排序）
-        """
+    async def search(self, query: str, top_k: int = 5) -> List[SearchResult]:
+        """检索知识库，返回最相似的文档及分数（异步）。"""
         embedding = await self._embedding_service.encode(query)
-        results = self._vector_store.search(embedding, top_k=top_k)
+        results = await self._vector_store.asearch(embedding, top_k=top_k)
+        return list(results)
 
-        docs = []
-        for result in results:
-            docs.append(
-                DomainDocument(
-                    doc_id=result.doc_id,
-                    content=result.content,
-                    title=result.title,
-                    tags=result.tags,
-                )
+    async def batch_search(
+        self, queries: List[str], top_k: int = 5
+    ) -> List[List[SearchResult]]:
+        """批量检索知识库（异步）。
+
+        先批量编码所有查询，再一次性批量检索，减少锁竞争。
+        """
+        if not queries:
+            return []
+
+        embeddings = await self._embedding_service.encode_batch(queries)
+
+        if hasattr(self._vector_store, "abatch_search"):
+            batch_results = await self._vector_store.abatch_search(
+                [embeddings[i] for i in range(len(queries))],
+                top_k=top_k,
             )
-        return docs
+        else:
+            batch_results = []
+            for i in range(len(queries)):
+                results = await self._vector_store.asearch(
+                    embeddings[i], top_k=top_k
+                )
+                batch_results.append(results)
 
-    def close(self) -> None:
-        """关闭资源。"""
-        self._vector_store.close()
+        return [list(results) for results in batch_results]
+
+    async def close(self) -> None:
+        """关闭资源（异步）。"""
+        await self._vector_store.aclose()
 
     def __enter__(self) -> "KnowledgeService":
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
-        self.close()
+        try:
+            loop = asyncio.get_running_loop()
+            if loop.is_running():
+                loop.create_task(self.close())
+        except RuntimeError:
+            asyncio.run(self.close())
+
+    async def __aenter__(self) -> "KnowledgeService":
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
+        await self.close()

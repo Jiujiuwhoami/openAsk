@@ -44,11 +44,27 @@ class ChatResponse(BaseModel):
     llm_used: bool = Field(..., description="是否使用了 LLM")
 
 
+class ChatStreamEvent(BaseModel):
+    """流式聊天事件模型。"""
+
+    event: str = Field(..., description="事件类型: sources / answer_delta / cache_hit / done / error")
+    data: object = Field(None, description="事件数据")
+
+
 class DocumentRequest(BaseModel):
     """创建文档请求模型。"""
 
     title: str = Field(..., description="文档标题", min_length=1, max_length=200)
     content: str = Field(..., description="文档内容", min_length=1)
+    tags: Optional[List[str]] = Field(None, description="标签列表")
+    source: Optional[str] = Field(None, description="来源")
+
+
+class UpdateDocumentRequest(BaseModel):
+    """更新文档请求模型。"""
+
+    title: Optional[str] = Field(None, description="文档标题", min_length=1, max_length=200)
+    content: Optional[str] = Field(None, description="文档内容")
     tags: Optional[List[str]] = Field(None, description="标签列表")
     source: Optional[str] = Field(None, description="来源")
 
@@ -70,6 +86,21 @@ class SearchRequest(BaseModel):
 
     query: str = Field(..., description="搜索关键词", min_length=1, max_length=2000)
     top_k: int = Field(10, description="返回数量", ge=1, le=50)
+
+
+class BatchSearchRequest(BaseModel):
+    """批量搜索请求模型。"""
+
+    queries: List[str] = Field(..., description="搜索关键词列表", min_length=1, max_length=50)
+    top_k: int = Field(10, description="每个查询返回数量", ge=1, le=50)
+
+
+class BatchSearchResultItem(BaseModel):
+    """单条批量搜索结果。"""
+
+    query_index: int = Field(..., description="查询索引")
+    query: str = Field(..., description="查询内容")
+    results: List["SearchResultResponse"] = Field(..., description="搜索结果列表")
 
 
 class SearchResultResponse(BaseModel):

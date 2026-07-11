@@ -1,7 +1,9 @@
 # FastAPI 框架
 fastapi>=0.115.0
+python-multipart>=0.0.9
 uvicorn>=0.30.0
 pydantic>=2.8.0
+pydantic-settings>=2.4.0        # 类型安全配置（BaseSettings 在 pydantic v2 中独立成包）
 
 # LangChain 知识库管理
 langchain>=0.3.0

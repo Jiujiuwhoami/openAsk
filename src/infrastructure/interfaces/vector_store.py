@@ -37,6 +37,16 @@ class VectorStore(ABC):
         pass
 
     @abstractmethod
+    def batch_search(
+        self,
+        query_vectors: List[np.ndarray],
+        top_k: int = 5,
+        filter_expr: Optional[str] = None,
+    ) -> List[List[SearchResult]]:
+        """批量向量相似度检索。"""
+        pass
+
+    @abstractmethod
     def count(self) -> int:
         """返回存储的文档总数。"""
         pass

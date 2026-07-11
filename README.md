@@ -1,6 +1,6 @@
-# Zvec + 独立站客服
+# OpenAsk - 独立站智能客服系统
 
-基于 **Zvec（阿里巴巴开源嵌入式向量数据库）** 和 **SenseNova API** 构建的智能客服系统，为独立站提供高效的问答服务。
+OpenAsk 是一个基于 **Zvec（阿里巴巴开源嵌入式向量数据库）** 和 **SenseNova API** 构建的开源智能客服系统，为独立站提供高效的问答服务。
 
 ## 功能特性
 
@@ -33,8 +33,8 @@
 #### 1. 克隆项目
 
 ```powershell
-git clone <repository-url>
-cd Zvec
+git clone https://github.com/jiujiuyao/OpenAsk.git
+cd OpenAsk
 ```
 
 #### 2. 安装依赖
@@ -83,8 +83,8 @@ Invoke-RestMethod -Uri http://127.0.0.1:8000/api/chat -Method Post -Body $body -
 #### 1. 克隆项目
 
 ```bash
-git clone <repository-url>
-cd Zvec
+git clone https://github.com/jiujiuyao/OpenAsk.git
+cd OpenAsk
 ```
 
 #### 2. 创建虚拟环境
@@ -135,7 +135,7 @@ curl -X POST http://localhost:8000/api/chat \
 ## 项目结构
 
 ```
-Zvec/
+OpenAsk/
 ├── docs/                    # 文档目录
 │   ├── claude.md           # AI 行为约束
 │   ├── project.md          # 架构概览
@@ -161,29 +161,60 @@ Zvec/
 
 ## API 接口
 
+> 完整的请求/响应 Schema 见 [src/api/schemas.py](src/api/schemas.py)。若 `.env` 中配置了 `API_KEY`，除健康检查外所有接口需在请求头携带 `X-API-Key`。
+
 ### 问答接口
 
 ```
 POST /api/chat
 请求体: { "query": "用户问题", "top_k": 5 }
-响应: { "code": 200, "message": "success", "data": { "answer": "...", "sources": [...] } }
+响应:   { "answer": "...", "sources": [...], "cache_hit": false, "llm_used": true }
+```
+
+### 流式问答接口（SSE）
+
+```
+POST /api/chat/stream
+请求体: { "query": "用户问题", "top_k": 5 }
+响应:   text/event-stream，逐事件返回：
+        - {"event": "sources",     "data": [...]}      # 来源文档
+        - {"event": "cache_hit",   "data": true}        # 是否命中缓存
+        - {"event": "answer_delta","data": "文本增量"}  # 回答增量
+        - {"event": "done",        "data": {"reranked": true}}
+        - {"event": "error",       "data": "错误信息"}
+```
+
+### 检索接口
+
+```
+POST /api/search         # 单次检索
+请求体: { "query": "用户问题", "top_k": 5 }
+响应:   [{ "doc_id": "...", "title": "...", "content": "...", "score": 0.95 }]
+
+POST /api/search/batch   # 批量检索（一次提交多个 query）
+请求体: { "queries": ["问题1", "问题2"], "top_k": 5 }
+响应:   [{ "query_index": 0, "query": "问题1", "results": [...] }, ...]
 ```
 
 ### 知识库管理 (RESTful)
 
 ```
-GET    /api/knowledge?page=1&page_size=20     # 知识点列表（分页）
-POST   /api/knowledge                          # 添加知识点
-GET    /api/knowledge/{id}                     # 获取单个知识点
-PUT    /api/knowledge/{id}                     # 更新知识点
-DELETE /api/knowledge/{id}                     # 删除知识点
+GET    /api/knowledge?page=1&page_size=20   # 知识点列表（分页）
+POST   /api/knowledge                        # 添加知识点（JSON）
+POST   /api/knowledge/upload                 # 上传文档（multipart，支持 .md/.txt/.pdf/.docx/.html）
+GET    /api/knowledge/{doc_id}               # 获取单个知识点
+PUT    /api/knowledge/{doc_id}               # 更新知识点
+DELETE /api/knowledge/{doc_id}               # 删除知识点
 ```
 
 ### 健康检查
 
 ```
 GET /api/health
-响应: { "status": "healthy", "zvec_status": "connected" }
+响应: { "status": "healthy", "version": "1.0.0", "timestamp": "...",
+        "zvec_status": "healthy", "embedding_status": "healthy",
+        "llm_status": "healthy", "cache_status": "healthy",
+        "document_count": 0 }
 ```
 
 ## 文档
