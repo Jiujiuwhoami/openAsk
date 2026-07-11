@@ -25,15 +25,42 @@ OpenAsk 是一个基于 **Zvec（阿里巴巴开源嵌入式向量数据库）**
 
 - Python 3.11+
 - 能访问 SenseNova API
+- Docker（可选，使用容器部署）
 
-### Windows 开发环境（系统 Python，不使用虚拟环境）
+### 一键启动（推荐） 🐳
+
+最快的方式，无需安装 Python 和依赖：
+
+```bash
+# 1. 克隆项目
+git clone https://github.com/Jiujiuwhoami/openAsk.git
+cd openAsk
+
+# 2. 配置环境变量
+cp .env.example .env
+# 编辑 .env，填入 SENSE_NOVA_API_KEY
+
+# 3. 一键启动
+docker compose up -d
+
+# 首次启动约 1-2 分钟（需下载模型），完成后：
+curl http://localhost:8000/api/health
+```
+
+首次启动会自动下载两个模型：
+- **Sentence-BERT**（`all-MiniLM-L6-v2`）— 文本向量化
+- **BGE-Reranker**（`BAAI/bge-reranker-v2-m3`）— 重排序精排
+
+下载完成后存入 HuggingFace 缓存，后续启动秒开。
+
+### 手动部署（Windows 开发环境）
 
 > 本项目 Windows 开发环境约定直接使用系统 Python，不创建虚拟环境。
 
 #### 1. 克隆项目
 
 ```powershell
-git clone https://github.com/jiujiuyao/OpenAsk.git
+git clone https://github.com/Jiujiuwhoami/openAsk.git
 cd OpenAsk
 ```
 
@@ -83,7 +110,7 @@ Invoke-RestMethod -Uri http://127.0.0.1:8000/api/chat -Method Post -Body $body -
 #### 1. 克隆项目
 
 ```bash
-git clone https://github.com/jiujiuyao/OpenAsk.git
+git clone https://github.com/Jiujiuwhoami/openAsk.git
 cd OpenAsk
 ```
 
