@@ -46,3 +46,8 @@ docker-compose.override.yml
 htmlcov/
 .coverage
 coverage.xml
+# 内部文档（不公开）
+docs/claude.md
+docs/project.md
+docs/development.md
+docs/implementation_checklist.md
