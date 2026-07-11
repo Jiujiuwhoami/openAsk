@@ -167,14 +167,8 @@ curl -X POST http://localhost:8000/api/chat \
 ```
 OpenAsk/
 ├── docs/                    # 文档目录
-│   ├── claude.md           # AI 行为约束
-│   ├── project.md          # 架构概览
-│   ├── development.md      # 代码规范
-│   └── deploy.md           # 运维备份
-├── data/                   # 数据目录
-│   ├── knowledge_base.md   # 知识点索引
-│   ├── documents/          # 原始文档存储
-│   └── zvec/               # Zvec 数据库文件
+│   └── deploy.md           # 部署运维手册
+├── data/                   # 数据目录（向量数据库文件等）
 ├── src/                    # 源代码目录
 │   ├── domain/             # 领域模型（Document, SearchResult）
 │   ├── infrastructure/     # 基础设施层（VectorStore, MetadataStore, EmbeddingService）
@@ -251,9 +245,6 @@ GET /api/health
 
 详细文档请查看 `docs/` 目录：
 
-- [claude.md](docs/claude.md) - AI 行为约束和系统指令
-- [project.md](docs/project.md) - 项目架构和技术栈
-- [development.md](docs/development.md) - 开发规范
 - [deploy.md](docs/deploy.md) - 部署与维护手册
 
 ## 贡献
