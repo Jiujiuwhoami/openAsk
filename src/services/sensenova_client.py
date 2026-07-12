@@ -164,14 +164,16 @@ class SenseNovaClient(LLMClient):
         }
 
     def _parse_response(self, response: httpx.Response) -> str:
-        """解析 API 响应。"""
+        """解析 API 响应，兼容 content 和 reasoning 字段。"""
         if response.status_code != 200:
             raise SenseNovaAPIError(
                 f"API 请求失败: {response.status_code} - {response.text}"
             )
 
         data = response.json()
-        content = data["choices"][0]["message"]["content"]
+        message = data["choices"][0].get("message", {})
+        # 优先取 content，部分推理模型使用 reasoning 字段
+        content = message.get("content") or message.get("reasoning", "")
         prompt_tokens = data.get("usage", {}).get("prompt_tokens", 0)
         completion_tokens = data.get("usage", {}).get("completion_tokens", 0)
 
@@ -255,9 +257,12 @@ class SenseNovaClient(LLMClient):
         prompt_tokens = 0
         completion_tokens = 0
 
+        logger.debug(f"流式请求开始: {url}, 模型: {self._model}, 上下文长度: {len(context)}")
+
         try:
             client = self._get_client()
             async with client.stream("POST", url, headers=headers, json=payload) as resp:
+                logger.debug(f"流式响应状态码: {resp.status_code}")
                 if resp.status_code != 200:
                     body = await resp.aread()
                     raise SenseNovaAPIError(
@@ -278,7 +283,11 @@ class SenseNovaClient(LLMClient):
                             choices = data.get("choices", [])
                             if choices:
                                 delta = choices[0].get("delta", {})
+                                # 标准 OpenAI 格式: delta.content
                                 content = delta.get("content", "")
+                                # 部分模型（如 DeepSeek）将内容放在 delta.reasoning 中
+                                if not content:
+                                    content = delta.get("reasoning", "")
                                 if content:
                                     completion_tokens += 1
                                     yield content
