@@ -23,7 +23,7 @@ class ChatRequest(BaseModel):
     """聊天请求模型。"""
 
     query: str = Field(..., description="用户查询", min_length=1, max_length=2000)
-    top_k: int = Field(5, description="返回文档数量", ge=1, le=20)
+    top_k: int = Field(10, description="返回文档数量", ge=1, le=20)
 
 
 class Source(BaseModel):

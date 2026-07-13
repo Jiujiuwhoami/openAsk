@@ -193,6 +193,7 @@ class Retriever:
         answer = await self._generate_answer(query, search_results)
         await self._cache_result(query_vector, answer)
 
+        logger.info(f"查询: '{query[:100]}' | 回答: {len(answer)} 字符 | 来源: {len(search_results)} 篇")
         return RetrievalResult(
             answer=answer,
             sources=search_results,
@@ -314,6 +315,7 @@ class Retriever:
                     yield {"event": "answer_delta", "data": answer}
 
             full_answer = "".join(answer_chunks)
+            logger.info(f"[流式] 查询: '{query[:100]}' | 回答: {len(full_answer)} 字符 | 来源: {len(search_results)} 篇")
             logger.debug(f"LLM 流式生成完成，长度: {len(full_answer)}")
             await self._cache_result(query_vector, full_answer)
 
