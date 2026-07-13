@@ -39,11 +39,11 @@ class PromptBuilder:
 ## 用户问题
 {query}
 
-## 回答要求
+## 回答规范
 1. 严格根据参考资料回答，不要编造信息
 2. 如果参考资料不足以完整回答，基于已有信息尽量回答，并说明你回答的依据
-3. 回答要完整、详细，引用具体的内容来源
-4. 保持清晰、有条理的结构
+3. **回答必须完整，不要中途截断**——把每个要点展开说明，确保内容自然收尾
+4. 保持清晰、有条理的结构，适当使用分段、列表等格式
 5. 语气友好、专业
 
 ## 回答"""
@@ -141,7 +141,7 @@ class SenseNovaClient(LLMClient):
     def _build_payload(
         self,
         prompt: str,
-        max_tokens: int = 512,
+        max_tokens: int = 2048,
         temperature: float = 0.7,
         stop: Optional[List[str]] = None,
     ) -> Dict:
@@ -189,7 +189,7 @@ class SenseNovaClient(LLMClient):
     async def complete(
         self,
         prompt: str,
-        max_tokens: int = 512,
+        max_tokens: int = 2048,
         temperature: float = 0.7,
         stop: Optional[List[str]] = None,
     ) -> str:
@@ -199,7 +199,7 @@ class SenseNovaClient(LLMClient):
 
         Args:
             prompt: 输入 Prompt
-            max_tokens: 最大输出 Token 数
+            max_tokens: 最大输出 Token 数（默认 2048）
             temperature: 温度参数（0-1，越高越随机）
             stop: 停止序列
 
@@ -252,7 +252,7 @@ class SenseNovaClient(LLMClient):
 
         prompt = PromptBuilder.build_qa_prompt(query, context)
         url = f"{self._api_base}/chat/completions"
-        payload = self._build_payload(prompt)
+        payload = self._build_payload(prompt, max_tokens=2048)
         payload["stream"] = True
         headers = self._build_headers()
 
