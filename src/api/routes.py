@@ -125,7 +125,7 @@ async def chat(
             Source(
                 doc_id=s.doc_id,
                 title=s.title,
-                content=s.content[:500] + "..." if len(s.content) > 500 else s.content,
+                content=s.content,
                 score=round(s.score, 4),
             )
             for s in result.sources
