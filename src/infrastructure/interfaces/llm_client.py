@@ -1,7 +1,10 @@
 """LLM 客户端抽象接口。"""
 
 from abc import ABC, abstractmethod
-from typing import AsyncGenerator, List
+from typing import AsyncGenerator, Dict, List, Union
+
+
+StreamChunk = Dict[str, Union[str, int]]
 
 
 class LLMClient(ABC):
@@ -27,7 +30,7 @@ class LLMClient(ABC):
     @abstractmethod
     async def stream_answer(
         self, query: str, context: List[str]
-    ) -> AsyncGenerator[str, None]:
+    ) -> AsyncGenerator[StreamChunk, None]:
         """流式生成回答，逐 token 产出文本增量。
 
         Args:
@@ -35,7 +38,9 @@ class LLMClient(ABC):
             context: 检索到的上下文片段列表
 
         Yields:
-            回答文本增量（通常是 token 或字符级别）
+            StreamChunk: 包含 type 和 content 的字典。
+                type 为 "reasoning" 时 content 为推理链文本，
+                type 为 "content" 时 content 为回答文本。
         """
         pass
 

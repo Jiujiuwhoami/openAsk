@@ -307,8 +307,11 @@ class Retriever:
             else:
                 if hasattr(self._llm_client, "stream_answer"):
                     async for chunk in self._llm_client.stream_answer(query, context):
-                        answer_chunks.append(chunk)
-                        yield {"event": "answer_delta", "data": chunk}
+                        if chunk["type"] == "reasoning":
+                            yield {"event": "reasoning_delta", "data": chunk["content"]}
+                        elif chunk["type"] == "content":
+                            answer_chunks.append(chunk["content"])
+                            yield {"event": "answer_delta", "data": chunk["content"]}
                 else:
                     answer = await self._llm_client.generate_answer(query, context)
                     answer_chunks.append(answer)

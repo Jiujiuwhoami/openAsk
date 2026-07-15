@@ -296,12 +296,13 @@ class SenseNovaClient(LLMClient):
                                 delta = choices[0].get("delta", {})
                                 # 标准 OpenAI 格式: delta.content
                                 content = delta.get("content", "")
-                                # 部分模型（如 DeepSeek）将内容放在 delta.reasoning 中
-                                if not content:
-                                    content = delta.get("reasoning", "")
+                                # 推理模型（如 DeepSeek-R1）的推理链
+                                reasoning = delta.get("reasoning_content", "") or delta.get("reasoning", "")
+                                if reasoning:
+                                    yield {"type": "reasoning", "content": reasoning}
                                 if content:
                                     completion_tokens += 1
-                                    yield content
+                                    yield {"type": "content", "content": content}
                             usage = data.get("usage")
                             if usage:
                                 prompt_tokens = usage.get("prompt_tokens", 0)
