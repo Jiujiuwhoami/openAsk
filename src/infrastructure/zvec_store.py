@@ -376,8 +376,8 @@ class ZvecStore(VectorStore):
     def list_paginated(self, page: int = 1, page_size: int = 10) -> List[Document]:
         """分页列出文档（同步）。
 
-        使用基于 created_at 的游标分页实现真正的分页，避免加载全部文档到内存。
-        利用 Zvec 的范围查询优化（enable_range_optimization=True）提高查询效率。
+        全量加载后按创建时间降序排序并切片，避免依赖 Zvec 默认顺序导致的游标错乱。
+        知识库文档总量通常不超过数千，全量加载在内存和性能上均可行。
 
         Args:
             page: 页码，从1开始
@@ -397,26 +397,14 @@ class ZvecStore(VectorStore):
                 if start >= count:
                     return []
 
-                if page == 1:
-                    results = self._collection.query(
-                        filter="status = 'active'",
-                        topk=page_size,
-                    )
-                else:
-                    cursor_docs = self._collection.query(
-                        filter="status = 'active'",
-                        topk=start + 1,
-                    )
-                    if len(cursor_docs) <= start:
-                        return []
-                    cursor_created_at = cursor_docs[-1].fields.get("created_at", 0)
-                    results = self._collection.query(
-                        filter=f"status = 'active' AND created_at < {cursor_created_at}",
-                        topk=page_size,
-                    )
+                # 获取全部 active 文档
+                all_results = self._collection.query(
+                    filter="status = 'active'",
+                    topk=min(count, 1000),
+                )
 
                 docs = []
-                for r in results:
+                for r in all_results:
                     docs.append(
                         Document(
                             doc_id=r.fields.get("doc_id", r.id),
@@ -428,8 +416,10 @@ class ZvecStore(VectorStore):
                             updated_at=r.fields.get("updated_at", 0),
                         )
                     )
+
+                # 按创建时间降序排列后切片
                 docs.sort(key=lambda x: x.created_at, reverse=True)
-                return docs
+                return docs[start:start + page_size]
         except Exception as e:
             logger.error(f"分页列出文档失败: {e}", exc_info=True)
             raise VectorStoreError(f"Failed to list documents: {e}")
