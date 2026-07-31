@@ -161,14 +161,18 @@ async def lifespan(app: FastAPI):
         reranker: Reranker = create_reranker()
         logger.info(f"Reranker 初始化完成 (启用: {reranker.is_enabled})")
 
+        from src.services.tenant_stats import TenantStatsRegistry
+
         retriever_factory = RetrieverFactory(
             embedding_service=embedding_service,
             vector_store=vector_store,
             default_llm_client=llm_client,
             reranker=reranker,
             embedding_cache=embedding_cache,
+            stats_registry=TenantStatsRegistry(),
         )
         logger.info("RetrieverFactory 初始化完成")
+        app.state.stats_registry = retriever_factory._stats_registry
 
         # 向后兼容：保留全局单例 retriever（用于 health check 等非租户路径）
         retriever = retriever_factory.get_retriever_for_tenant("default")

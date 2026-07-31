@@ -113,6 +113,7 @@ class Retriever:
         llm_client: LLMClient,
         reranker: Optional[Reranker] = None,
         embedding_cache=None,
+        stats_registry=None,
     ):
         self._embedding_service = embedding_service
         self._vector_store = vector_store
@@ -120,7 +121,28 @@ class Retriever:
         self._llm_client = llm_client
         self._reranker = reranker
         self._embedding_cache = embedding_cache
+        self._stats_registry = stats_registry
         self._system_prompt: Optional[str] = None
+
+    def _record_stats(
+        self,
+        tenant_id: str,
+        *,
+        cache_hit: bool,
+        prompt_tokens: int = 0,
+        completion_tokens: int = 0,
+    ) -> None:
+        """记录一次检索/生成请求到统计注册表。"""
+        if self._stats_registry is not None:
+            try:
+                self._stats_registry.record(
+                    tenant_id=tenant_id,
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                    cache_hit=cache_hit,
+                )
+            except Exception as e:
+                logger.warning(f"统计记录失败: {e}")
 
     async def retrieve(
         self,
@@ -161,6 +183,7 @@ class Retriever:
         if cached_answer:
             logger.debug("缓存命中，直接返回")
             sources = await self._get_sources_for_cache(query_vector, top_k, tenant_id=tenant_id)
+            self._record_stats(tenant_id, cache_hit=True)
             return RetrievalResult(
                 answer=cached_answer,
                 sources=sources,
@@ -204,6 +227,8 @@ class Retriever:
 
         answer = await self._generate_answer(query, search_results, system_prompt=effective_prompt)
         await self._cache_result(query_vector, answer, cache_backend=cache_backend)
+
+        self._record_stats(tenant_id, cache_hit=False)
 
         logger.info(f"查询: '{query[:100]}' | 回答: {len(answer)} 字符 | 来源: {len(search_results)} 篇")
         return RetrievalResult(
@@ -265,6 +290,7 @@ class Retriever:
                 for s in sources
             ]
             yield {"event": "sources", "data": sources_data}
+            self._record_stats(tenant_id, cache_hit=True)
             yield {"event": "cache_hit", "data": True}
             yield {"event": "answer_delta", "data": cached_answer}
             yield {"event": "done", "data": None}
@@ -342,6 +368,8 @@ class Retriever:
             logger.info(f"[流式] 查询: '{query[:100]}' | 回答: {len(full_answer)} 字符 | 来源: {len(search_results)} 篇")
             logger.debug(f"LLM 流式生成完成，长度: {len(full_answer)}")
             await self._cache_result(query_vector, full_answer, cache_backend=cache_backend)
+
+            self._record_stats(tenant_id, cache_hit=False)
 
         except SenseNovaAPIError as e:
             logger.error(f"LLM 调用失败，降级为返回原始文档: {e}")

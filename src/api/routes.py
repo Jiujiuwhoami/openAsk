@@ -736,6 +736,22 @@ async def get_tenant_stats(request: Request, tenant_id: str):
         except Exception:
             pass
 
+    # 从统计注册表读取真实调用数据
+    stats_registry = getattr(request.app.state, "stats_registry", None)
+    if stats_registry is not None:
+        stats = stats_registry.get_stats(tenant_id)
+        if stats is not None:
+            return TenantStatsResponse(
+                tenant_id=tenant_id,
+                document_count=doc_count,
+                total_calls=stats.total_calls,
+                prompt_tokens=stats.prompt_tokens,
+                completion_tokens=stats.completion_tokens,
+                cache_hit_rate=stats.cache_hit_rate,
+                created_at=t.created_at,
+                last_request=int(stats.last_call_at),
+            )
+
     return TenantStatsResponse(
         tenant_id=tenant_id,
         document_count=doc_count,

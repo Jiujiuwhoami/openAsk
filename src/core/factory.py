@@ -18,6 +18,7 @@ from typing import Optional
 
 from src.core.retriever import Retriever
 from src.domain.models import DEFAULT_TENANT_ID, Tenant
+from src.services.tenant_stats import TenantStatsRegistry
 from src.infrastructure.interfaces.cache_backend import CacheBackend
 from src.infrastructure.interfaces.embedding_service import EmbeddingService
 from src.infrastructure.interfaces.llm_client import LLMClient
@@ -89,12 +90,14 @@ class RetrieverFactory:
         embedding_cache=None,
         reranker: Optional[Reranker] = None,
         lru_maxsize: int = 128,
+        stats_registry: Optional[TenantStatsRegistry] = None,
     ):
         self._embedding_service = embedding_service
         self._vector_store = vector_store
         self._default_llm_client = default_llm_client
         self._reranker = reranker
         self._embedding_cache = embedding_cache
+        self._stats_registry = stats_registry
         self._cache = RetrieverCache(maxsize=lru_maxsize)
 
     def get_retriever_for_tenant(
@@ -121,6 +124,7 @@ class RetrieverFactory:
             llm_client=llm_client,
             reranker=self._reranker,
             embedding_cache=self._embedding_cache,
+            stats_registry=self._stats_registry,
         )
 
         self._cache.put(tenant_id, retriever)

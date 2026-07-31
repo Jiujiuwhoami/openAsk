@@ -10,7 +10,7 @@
 import os
 import sys
 import tempfile
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi import FastAPI
@@ -18,6 +18,7 @@ from fastapi.testclient import TestClient
 
 from src.api.routes import router, admin_router
 from src.services.tenant_service import TenantService
+from src.services.tenant_stats import TenantStatsRegistry
 
 # ================================================================
 # 常量
@@ -76,6 +77,9 @@ def e2e_app(tmp_path):
 
     mock_retriever = type("MockRetriever", (), {"_llm_client": type("MockLLM", (), {"is_configured": True})()})()
     mock_factory = _make_mock_factory(mock_retriever)
+    mock_stats_registry = TenantStatsRegistry()
+    mock_factory._stats_registry = mock_stats_registry
+    mock_retriever._stats_registry = mock_stats_registry
     mock_ks = _make_mock_knowledge_service()
     mock_vs = type("MockVS", (), {"acount": lambda *a, **kw: 0, "count": lambda *a, **kw: 0})()
     mock_es = type("MockES", (), {"dimension": lambda *a, **kw: 384})()
@@ -90,6 +94,7 @@ def e2e_app(tmp_path):
     app.state.embedding_service = mock_es
     app.state.limiter = None
     app.state.tenant_limiter = mock_tl
+    app.state.stats_registry = mock_stats_registry
     app.include_router(router)
     app.include_router(admin_router)
 
@@ -470,3 +475,105 @@ class TestSoftDelete:
         assert svc.delete_tenant(tid) is True
         # 第二次删除（get_by_id 仍返回记录）
         assert svc.delete_tenant(tid) is True
+
+
+# ================================================================
+# 测试：统计注册表
+# ================================================================
+
+
+class TestTenantStatsRegistry:
+    """验证 TenantStatsRegistry 的记录和读取。"""
+
+    def test_record_and_get_stats(self):
+        registry = TenantStatsRegistry()
+        registry.record("t1", prompt_tokens=100, completion_tokens=50, cache_hit=False)
+        registry.record("t1", prompt_tokens=200, completion_tokens=30, cache_hit=True)
+
+        stats = registry.get_stats("t1")
+        assert stats is not None
+        assert stats.total_calls == 2
+        assert stats.prompt_tokens == 300
+        assert stats.completion_tokens == 80
+        assert stats.cache_hits == 1
+        assert stats.cache_hit_rate == 0.5
+
+    def test_separate_tenants(self):
+        registry = TenantStatsRegistry()
+        registry.record("t1", prompt_tokens=100, completion_tokens=50)
+        registry.record("t2", prompt_tokens=200, completion_tokens=100)
+
+        s1 = registry.get_stats("t1")
+        s2 = registry.get_stats("t2")
+        assert s1.total_calls == 1 and s2.total_calls == 1
+        assert s1.prompt_tokens == 100 and s2.prompt_tokens == 200
+
+    def test_reset(self):
+        registry = TenantStatsRegistry()
+        registry.record("t1", prompt_tokens=50)
+        assert registry.get_stats("t1").total_calls == 1
+        registry.reset("t1")
+        assert registry.get_stats("t1") is None
+
+    def test_reset_all(self):
+        registry = TenantStatsRegistry()
+        registry.record("t1", prompt_tokens=50)
+        registry.record("t2", prompt_tokens=100)
+        registry.reset()
+        assert registry.get_stats("t1") is None
+        assert registry.get_stats("t2") is None
+
+    def test_cache_hit_rate_zero_calls(self):
+        registry = TenantStatsRegistry()
+        stats = registry.get_stats("nonexistent")
+        assert stats is None
+        # 未创建则不报错，返回 None
+
+
+# ================================================================
+# 测试：Stats 端点返回真实数据
+# ================================================================
+
+
+class TestStatsEndpoint:
+    """验证 /tenants/{id}/stats 端点返回真实统计。"""
+
+    def test_stats_endpoint_returns_real_data(self, e2e_app):
+        """手动记录 stats 后，stats 端点应返回对应数据。"""
+        client, svc = e2e_app
+
+        # 创建租户
+        create_resp = client.post(
+            "/api/admin/tenants",
+            headers={"X-API-Key": ADMIN_KEY},
+            json={"name": "统计测试租户"},
+        )
+        tid = create_resp.json()["tenant_id"]
+
+        # 直接往 stats registry 写入模拟数据
+        client.app.state.stats_registry.record(
+            tid, prompt_tokens=500, completion_tokens=200, cache_hit=False,
+        )
+        client.app.state.stats_registry.record(
+            tid, prompt_tokens=100, completion_tokens=50, cache_hit=True,
+        )
+
+        resp = client.get(
+            f"/api/admin/tenants/{tid}/stats",
+            headers={"X-API-Key": ADMIN_KEY},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total_calls"] == 2
+        assert data["prompt_tokens"] == 600
+        assert data["completion_tokens"] == 250
+        assert data["cache_hit_rate"] == 0.5
+        assert data["last_request"] > 0
+
+    def test_stats_endpoint_nonexistent_tenant(self, e2e_app):
+        client, svc = e2e_app
+        resp = client.get(
+            "/api/admin/tenants/nonexistent/stats",
+            headers={"X-API-Key": ADMIN_KEY},
+        )
+        assert resp.status_code == 404
