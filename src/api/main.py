@@ -43,6 +43,7 @@ from src.infrastructure.interfaces.llm_client import LLMClient
 from src.infrastructure.interfaces.reranker import Reranker
 from src.infrastructure.llm_response_cache import LLMResponseCache
 from src.infrastructure.reranker import create_reranker
+from src.infrastructure.embedding_cache import EmbeddingCache
 from src.infrastructure.zvec_store import ZvecStore
 from src.services.knowledge_service import KnowledgeService
 from src.services.sensenova_client import SenseNovaClient
@@ -127,6 +128,9 @@ async def lifespan(app: FastAPI):
         cache_backend: CacheBackend = LLMResponseCache()
         logger.info("LLMResponseCache 初始化完成")
 
+        embedding_cache = EmbeddingCache()
+        logger.info(f"EmbeddingCache 初始化完成 (enabled={embedding_cache.stats()['enabled']}, maxsize={embedding_cache.stats()['maxsize']})")
+
         llm_client: LLMClient = create_llm_client()
         logger.info("LLMClient 初始化完成")
 
@@ -139,6 +143,7 @@ async def lifespan(app: FastAPI):
             cache_backend=cache_backend,
             llm_client=llm_client,
             reranker=reranker,
+            embedding_cache=embedding_cache,
         )
         logger.info("Retriever 初始化完成")
 

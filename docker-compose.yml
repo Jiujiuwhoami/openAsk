@@ -20,3 +20,15 @@ services:
       timeout: 10s
       retries: 3
       start_period: 30s
+
+  admin-panel:
+    build:
+      context: ../admin-panel
+    container_name: admin-panel
+    ports:
+      - "${ADMIN_PORT:-5173}:80"
+    environment:
+      - API_BACKEND_URL=http://openask:8000
+    restart: unless-stopped
+    depends_on:
+      - openask

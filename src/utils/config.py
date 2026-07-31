@@ -79,6 +79,16 @@ class RateLimitSettings(BaseSettings):
     storage_uri: str = "memory://"
 
 
+class EmbeddingCacheSettings(BaseSettings):
+    """查询 Embedding 缓存配置（相同查询 → 复用向量）。"""
+
+    model_config = SettingsConfigDict(env_prefix="EMBEDDING_CACHE_", extra="ignore")
+
+    enabled: bool = True
+    maxsize: int = 10000
+    ttl: int = 3600  # 1 hour
+
+
 class LLMCacheSettings(BaseSettings):
     """LLM 缓存配置。"""
 
@@ -151,6 +161,7 @@ class Settings(BaseSettings):
     llm: LLMSettings = Field(default_factory=LLMSettings)
     zvec: ZvecSettings = Field(default_factory=ZvecSettings)
     embedding: EmbeddingSettings = Field(default_factory=EmbeddingSettings)
+    embedding_cache: EmbeddingCacheSettings = Field(default_factory=EmbeddingCacheSettings)
     api: ApiSettings = Field(default_factory=ApiSettings)
     rate_limit: RateLimitSettings = Field(default_factory=RateLimitSettings)
     llm_cache: LLMCacheSettings = Field(default_factory=LLMCacheSettings)
@@ -170,6 +181,7 @@ __all__ = [
     "ZvecSettings",
     "EmbeddingSettings",
     "ApiSettings",
+    "EmbeddingCacheSettings",
     "RateLimitSettings",
     "LLMCacheSettings",
     "LoggingSettings",

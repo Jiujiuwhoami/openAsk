@@ -1,4 +1,8 @@
-"""检索引擎：编排 RAG 完整流程（嵌入→检索→重排序→生成→缓存）。"""
+"""检索引擎：编排 RAG 完整流程（嵌入→检索→重排序→生成→缓存）。
+
+新增：查询 Embedding 缓存 — 相同 query 跳过 Sentence-BERT 编码，
+直接从内存返回之前算好的向量，可节省 50-200ms/请求。
+"""
 
 import asyncio
 from typing import AsyncGenerator, List, Optional
@@ -108,12 +112,14 @@ class Retriever:
         cache_backend: CacheBackend,
         llm_client: LLMClient,
         reranker: Optional[Reranker] = None,
+        embedding_cache=None,
     ):
         self._embedding_service = embedding_service
         self._vector_store = vector_store
         self._cache_backend = cache_backend
         self._llm_client = llm_client
         self._reranker = reranker
+        self._embedding_cache = embedding_cache
 
     async def retrieve(
         self,
@@ -334,8 +340,22 @@ class Retriever:
         yield {"event": "done", "data": {"reranked": reranked}}
 
     async def _encode_query(self, query: str) -> np.ndarray:
-        """将查询文本编码为向量（异步）。"""
-        return await self._embedding_service.encode(query)
+        """将查询文本编码为向量（异步）。
+
+        优先从 Embedding 缓存获取，命中则跳过 Sentence-BERT 编码，
+        可节省 50-200ms/请求。miss 时正常编码并写入缓存。
+        """
+        if self._embedding_cache is not None:
+            cached = await self._embedding_cache.aget(query)
+            if cached is not None:
+                return cached
+
+        vec = await self._embedding_service.encode(query)
+
+        if self._embedding_cache is not None:
+            await self._embedding_cache.aset(query, vec)
+
+        return vec
 
     async def _check_cache(self, query_vector: np.ndarray) -> Optional[str]:
         """检查缓存是否命中（异步）。"""

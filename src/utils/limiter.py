@@ -26,4 +26,14 @@ starlette.config.Config._read_file = _read_file_utf8
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 
-limiter = Limiter(key_func=get_remote_address)
+
+def _key_func(request):
+    """优先读 X-Forwarded-For（代理/网关场景），降级到 socket IP。"""
+    forwarded = request.headers.get("x-forwarded-for")
+    if forwarded:
+        # 可能有多个 IP，取第一个（最左边的客户端）
+        return forwarded.split(",")[0].strip()
+    return get_remote_address(request)
+
+
+limiter = Limiter(key_func=_key_func)

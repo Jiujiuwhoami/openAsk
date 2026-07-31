@@ -28,6 +28,7 @@ from src.core.retriever import RetrievalResult
 from src.domain.exceptions import KnowledgeBaseError, DocumentNotFoundError
 from src.utils.config import settings
 
+
 router = APIRouter(prefix="/api")
 
 
@@ -107,7 +108,7 @@ async def get_knowledge_service(request: Request):
 
 
 @router.post("/chat", response_model=ChatResponse)
-@limiter.limit("60/minute")
+@limiter.limit(settings.rate_limit.per_user)
 async def chat(
     request: Request,
     body: ChatRequest,
@@ -142,7 +143,7 @@ async def chat(
 
 
 @router.post("/chat/stream")
-@limiter.limit("60/minute")
+@limiter.limit(settings.rate_limit.per_user)
 async def chat_stream(
     request: Request,
     body: ChatRequest,
@@ -346,7 +347,7 @@ async def delete_document(
 
 
 @router.post("/search", response_model=list[SearchResultResponse])
-@limiter.limit("60/minute")
+@limiter.limit(settings.rate_limit.per_user)
 async def search(
     request: Request,
     body: SearchRequest,
