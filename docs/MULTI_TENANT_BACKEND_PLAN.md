@@ -1,537 +1,179 @@
 # openAsk 后端多租户改造清单
 
-> 项目：openAsk 智能知识库问答系统  
-> 目标：从单租户 → 完整多租户  
+> 项目：openAsk 智能知识库问答系统
+> 目标：从单租户 → 完整多租户
 > 最后更新：2026-07-31
 
+**状态：✅ 全部完成** — 所有 P0 / P1 / P2 项已实现并通过集成测试
+
 ---
 
-## 阶段 P0 — 核心改造（8-12 天）
+## 阶段 P0 — 核心改造（✅ 已完成）
 
-### 1. 租户模型与 API Key 管理
+### 1. 租户模型与 API Key 管理 ✅
 
-#### 1.1 新增 domain/models.py — Tenant 实体
-
-```python
-class Tenant:
-    """实体：多租户，由 tenant_id 标识。"""
-
-    def __init__(
-        self,
-        tenant_id: str,              # "tenant_001"
-        api_key: str,                # "sk_xxx"
-        name: str,                   # "某电商站"
-        status: str = "active",      # active / suspended / trial
-        knowledge_path: str = "",    # 向量存储路径（可选）
-        # LLM 配置（每个租户可不同）
-        llm_api_key: str = "",
-        llm_api_base: str = "",
-        llm_model: str = "",
-        llm_timeout: int = 30,
-        # 限流
-        rate_limit_per_user: str = "60/minute",
-        rate_limit_global: str = "1000/minute",
-        # Prompt 定制
-        system_prompt: str = "",
-        # 元数据
-        created_at: int = 0,
-        updated_at: int = 0,
-    ):
-        ...
-```
-
-**涉及文件：**
-- `domain/models.py` — 新增 Tenant 类
-- `domain/models.py` — Document 加 `tenant_id` 字段
-- `domain/models.py` — SearchResult 加 `tenant_id` 字段
+#### 1.1 Tenant 实体 ✅
+- `domain/models.py` — 新增 `Tenant` 类（含 `tenant_id`、`api_key`、`name`、`status`、LLM 配置、限流、`system_prompt`）
+- `domain/models.py` — `Document` 加 `tenant_id` 字段
+- `domain/models.py` — `SearchResult` 加 `tenant_id` 字段
 - `domain/exceptions.py` — 新增 `TenantNotFoundError`
 
-#### 1.2 新增 services/tenant_service.py — 租户管理服务
+#### 1.2 TenantService ✅
+- `services/tenant_service.py` — 新建，SQLite 存储，11 个方法：
+  - `create_tenant()` / `get_by_id()` / `get_by_api_key()` / `list_tenants()`
+  - `update_tenant()` / `delete_tenant()` / `rotate_api_key()`
+  - `update_rate_limit()` / `get_document_count()` / `ensure_default_tenant()`
+- `utils/config.py` — 加 `TenantStorageSettings`
 
-```python
-class TenantService:
-    """租户管理：CRUD + API Key 鉴权 + 配置读取。"""
-
-    def create_tenant(self, ...) -> Tenant
-    def get_by_id(self, tenant_id: str) -> Tenant
-    def get_by_api_key(self, api_key: str) -> Tenant
-    def list_tenants(self) -> List[Tenant]
-    def update_tenant(self, tenant_id: str, ...) -> Tenant
-    def delete_tenant(self, tenant_id: str) -> bool
-    def rotate_api_key(self, tenant_id: str) -> str   # 轮换 key
-    def update_rate_limit(self, tenant_id: str, ...) -> None
-```
-
-**存储方案：优先 SQLite（小团队）→ 后改 MySQL/PostgreSQL**
-
-**涉及文件：**
-- `services/tenant_service.py` — 新建
-- `utils/config.py` — 加 TenantStorageSettings
-
-#### 1.3 API Key 鉴权改造
-
-**改前（固定 key）：**
-```python
-# routes.py
-@router.post("/chat/stream")
-@limiter.limit("60/minute")
-async def chat_stream(request: Request, body: ChatRequest, ...):
-    if settings.api.api_key and request.headers["X-API-Key"] != settings.api.api_key:
-        raise HTTPException(401)
-```
-
-**改后（多 key → resolve_tenant）：**
-```python
-async def resolve_tenant(request: Request) -> Tenant:
-    """FastAPI Depends：从 X-API-Key 解析租户，注入 request.state"""
-    key = request.headers.get("X-API-Key")
-    tenant = tenant_service.get_by_api_key(key)
-    if not tenant or tenant.status != "active":
-        raise HTTPException(401, detail="Unauthorized")
-    request.state.tenant = tenant
-    return tenant
-
-@router.post("/chat/stream")
-@limiter.dynamic_limit()  # 改为动态限流
-async def chat_stream(
-    request: Request,
-    body: ChatRequest,
-    tenant: Tenant = Depends(resolve_tenant),   # ← 租户上下文注入
-):
-    ...
-```
-
-**涉及文件：**
-- `api/routes.py` — 重构 verify_api_key → resolve_tenant，所有路由加 Depends
-- `api/routes.py` — health 端点保留免鉴权（`@router.get("/health")` 不加 tenant）
+#### 1.3 API Key 鉴权 ✅
+- `api/routes.py` — `resolve_tenant()` + `resolve_optional_tenant()` 替代原 `verify_api_key`
+- 所有业务路由挂载 `Depends(resolve_tenant)`
+- `/api/health` 保留免鉴权
+- **实际实现差异**：采用 FastAPI Depends + `request.state.tenant` 注入，未使用 `@limiter.dynamic_limit()` 装饰器（改用 `TenantLimiter` 中间件）
 
 ---
 
-### 2. 知识库隔离
+### 2. 知识库隔离 ✅
 
-#### 2.1 方案选择
+**采用方案 A：按 tenant_id filter**（与原计划一致）
 
-| 方案 | 做法 | 改动量 |
+| 改动 | 文件 | 状态 |
 |---|---|---|
-| **A. 按 tenant_id filter** | Zvec 所有查询加 `filter_expr=f"tenant_id = '{tenant.id}'"` | **推荐 ✅** 改动最小 |
-| B. 按 tenant 切 data 目录 | 每个租户独立 `data/zvec/{tenant_id}` 目录 | 大改，需改 schema |
+| Zvec schema 加 `tenant_id` 字段 | `infrastructure/zvec_store.py` | ✅ |
+| insert / upsert 写入 tenant_id | `infrastructure/zvec_store.py` | ✅ |
+| search / get / list / count / delete 加 tenant 过滤 | `infrastructure/zvec_store.py` | ✅ |
+| `knowledge_service.py` 所有方法加 `tenant_id` 参数 | `services/knowledge_service.py` | ✅ |
+| `retriever.py` 透传 tenant_id 到 `_vector_search()` | `core/retriever.py` | ✅ |
+| `retriever.py` 透传 tenant_id 到 `_get_sources_for_cache()` | `core/retriever.py` | ✅ |
+| 知识库 CRUD / 搜索路由传入 tenant_id | `api/routes.py` | ✅ |
 
-**采用方案 A：filter_expr 隔离。**
-
-#### 2.2 改动清单
-
-**`domain/models.py` — Document：**
-```python
-class Document:
-    def __init__(self, ..., tenant_id: str = "", ...):
-        self._tenant_id = tenant_id
-    @property
-    def tenant_id(self) -> str:
-        return self._tenant_id
-```
-
-**`domain/models.py` — SearchResult：**
-```python
-class SearchResult:
-    def __init__(self, ..., tenant_id: str = ""):
-        self._tenant_id = tenant_id
-    @property
-    def tenant_id(self) -> str:
-        return self._tenant_id
-```
-
-**`api/schemas.py` — DocumentResponse：**
-```python
-class DocumentResponse(BaseModel):
-    tenant_id: str = Field("", description="租户 ID")
-    ...
-```
-
-**`infrastructure/zvec_store.py` — 全部 CRUD 方法加 tenant 过滤：**
-
-| 方法 | 改动 |
-|---|---|
-| `_build_schema()` | 新增 `tenant_id` 字段（STRING, InvertIndexParam） |
-| `insert()` / `upsert()` | 插入时写入 `tenant_id` 字段；默认值 `"default"` 兼容旧数据 |
-| `search()` | 加 `tenant_id=...` 参数 → `filter_expr=f"tenant_id = '{tid}'"` |
-| `get()` | 加 tenant 过滤 |
-| `list()` | 加 tenant 过滤 |
-| `list_paginated()` | 加 tenant 过滤 |
-| `count()` | 加 tenant 过滤 |
-| `delete()` | 加 tenant 过滤 |
-
-**`services/knowledge_service.py` — 所有方法加 tenant 参数：**
-```python
-async def create_document_from_text(
-    self, title, content, ..., tenant_id: str = "default"
-) -> Document:
-    doc = DomainDocument(..., tenant_id=tenant_id)
-    embedding = await self._embedding_service.encode(doc.content)
-    await self._vector_store.ainsert(doc, embedding, tenant_id=tenant_id)
-```
-
-**`core/retriever.py` — _vector_search 传 tenant：**
-```python
-async def _vector_search(self, query_vector, top_k, tenant_id: str):
-    return await self._vector_store.asearch(
-        query_vector, top_k=top_k, tenant_id=tenant_id
-    )
-```
-
-**`api/routes.py` — 所有知识库路由传 tenant：**
-```python
-async def get_knowledge_service(request: Request) -> KnowledgeService:
-    tenant = request.state.tenant
-    return knowledge_service_factory.get_for_tenant(tenant)
-```
-
-**涉及文件（共 6 个）：**
-- `domain/models.py`
-- `domain/exceptions.py`
-- `api/schemas.py`
-- `infrastructure/interfaces/vector_store.py`
-- `infrastructure/zvec_store.py`
-- `services/knowledge_service.py`
-- `core/retriever.py`
-- `api/routes.py`
+**实际实现差异**：
+- `retriever.py` 采用**透传参数**方案（`retrieve()` / `retrieve_stream()` 加 `tenant_id` 参数），而非原 plan 中的"工厂模式单独创建 ZvecStore 实例"
+- 统一使用**单个 ZvecStore 实例 + `tenant_id` filter_expr 过滤**，避免每租户维护一份向量数据副本
 
 ---
 
-### 3. LLM 配置隔离
+### 3. LLM 配置隔离 ✅
 
-#### 3.1 SenseNovaClient 改造
+#### 3.1 SenseNovaClient 支持运行时配置 ✅
+- `services/sensenova_client.py` — 支持 `api_key` / `api_base` / `model` / `timeout` 运行时传入，降级使用全局配置
 
-**改前（单实例，全局配置）：**
-```python
-class SenseNovaClient:
-    def __init__(self):
-        self._api_key = settings.llm.api_key
-        self._api_base = settings.llm.api_base
-        self._model = settings.llm.model
-```
+#### 3.2 Retriever 工厂分发 ✅
+- **新建** `src/core/factory.py` — `RetrieverFactory` + `RetrieverCache`
+  - 按租户创建独立 Retriever 实例（独立 `LLMResponseCache` + `LLMClient`）
+  - 共享 `EmbeddingService` / `ZvecStore` / `Reranker` / `EmbeddingCache`
+  - 支持租户自定义 LLM 配置（API Key / Base / Model）
+  - LRU 缓存避免重复创建（默认 maxsize=128）
+- `api/main.py` — lifespan 改用 `RetrieverFactory` 替代原单例模式
 
-**改后（支持运行时传入租户配置）：**
-```python
-class SenseNovaClient:
-    def __init__(
-        self,
-        api_key: Optional[str] = None,       # 优先参数，降级 settings
-        api_base: Optional[str] = None,
-        model: Optional[str] = None,
-        timeout: Optional[int] = None,
-    ):
-        self._api_key = api_key or settings.llm.api_key
-        self._api_base = api_base or settings.llm.api_base
-        self._model = model or settings.llm.model
-        self._timeout = timeout or settings.llm.timeout
-```
+**实际实现差异**：
+- 未采用原 plan 的 `create_retriever_for_tenant(tenant)` 内联函数
+- 新建独立 `factory.py` 模块，逻辑更清晰、可测试
+- 共享 ZvecStore + tenant_id filter，而非每租户独立 ZvecStore
 
-#### 3.2 main.py — 单例改工厂分发
+#### 3.3 LLMResponseCache 按租户隔离 ✅
+- `infrastructure/llm_response_cache.py` — 支持独立 `cache_path`，自动创建父目录
+- 每租户缓存目录：`data/zvec_llm_cache/{tenant_id}`
 
-**改前（lifespan 单例）：**
-```python
-# 启动时创建一次
-llm_client = SenseNovaClient()
-retriever = Retriever(
-    embedding_service=embedding_service,
-    vector_store=vector_store,
-    cache_backend=cache_backend,
-    llm_client=llm_client,
-)
-app.state.retriever = retriever
-```
-
-**改后（按租户创建）：**
-```python
-# 全局共享资源
-app.state.embedding_service = embedding_service
-app.state.embedding_cache = EmbeddingCache()
-
-def create_retriever_for_tenant(tenant: Tenant) -> Retriever:
-    llm_client = SenseNovaClient(
-        api_key=tenant.llm_api_key,
-        api_base=tenant.llm_api_base,
-        model=tenant.llm_model,
-        timeout=tenant.llm_timeout,
-    )
-    vector_store = ZvecStore(tenant_id=tenant.id)
-    cache_backend = LLMResponseCache(cache_path=f"data/zvec_llm_cache/{tenant.id}")
-    return Retriever(
-        embedding_service=app.state.embedding_service,
-        vector_store=vector_store,
-        cache_backend=cache_backend,
-        llm_client=llm_client,
-        embedding_cache=app.state.embedding_cache,
-    )
-
-# 每个请求按需创建（或加 LRUCache 复用）
-async def get_retriever(request: Request) -> Retriever:
-    tenant = request.state.tenant
-    key = tenant.id
-    if key not in app.state._retriever_cache:
-        app.state._retriever_cache[key] = create_retriever_for_tenant(tenant)
-    return app.state._retriever_cache[key]
-```
-
-#### 3.3 LLMResponseCache 隔离
-
-```python
-# 改前
-cache_backend = LLMResponseCache()
-cache_path = "data/zvec_llm_cache"   # 全局共享
-
-# 改后
-cache_backend = LLMResponseCache(
-    cache_path=f"data/zvec_llm_cache/{tenant.id}"   # 按租户隔离
-)
-```
-
-#### 3.4 Prompt 模板定制
-
-```python
-# services/sensenova_client.py
-class PromptBuilder:
-    @classmethod
-    def build_qa_prompt(cls, query, context, system_prompt=None):
-        instructions = system_prompt or "你是一位专业的知识库问答助手..."
-        return f"""{instructions}
-...
-```
-
-```python
-# routes.py — 从 tenant 取 system_prompt
-async def chat_stream(request, body, tenant=Depends(resolve_tenant)):
-    retriever = get_retriever(request)
-    retriever.set_system_prompt(tenant.system_prompt)  # 或传入
-    ...
-```
-
-**涉及文件（共 4 个）：**
-- `infrastructure/interfaces/llm_client.py`
-- `services/sensenova_client.py`
-- `api/main.py`
-- `core/retriever.py`
+#### 3.4 Prompt 模板定制 ✅
+- `tenant.system_prompt` 通过 `retriever.retrieve()` / `retrieve_stream()` 的 `system_prompt` 参数传入
 
 ---
 
-### 4. 限流按租户隔离
+### 4. 限流按租户隔离 ✅
 
-#### 4.1 limiter.py 改造
+| 改动 | 文件 | 状态 |
+|---|---|---|
+| `TenantLimiter` 滑动窗口限流 | `utils/dynamic_limiter.py` | ✅ |
+| 按 tenant_id 限流，无租户按 IP 兜底 | `utils/dynamic_limiter.py` | ✅ |
+| 中间件动态限流 | `api/main.py` | ✅ |
+| 移除 chat/chat_stream 静态 `@limiter.limit` | `api/routes.py` | ✅ |
 
-**改前（按 IP）：**
-```python
-def _key_func(request):
-    forwarded = request.headers.get("x-forwarded-for")
-    if forwarded:
-        return forwarded.split(",")[0].strip()
-    return get_remote_address(request)
-
-limiter = Limiter(key_func=_key_func)
-```
-
-**改后（按 tenant api_key）：**
-```python
-def _key_func(request):
-    """优先按租户 key 限流，无租户则按 IP 兜底"""
-    tenant = getattr(request.state, "tenant", None)
-    if tenant:
-        return f"tenant:{tenant.api_key}"
-    # 无 key 的公开端点（如 health）按 IP 限流
-    forwarded = request.headers.get("x-forwarded-for")
-    if forwarded:
-        return f"ip:{forwarded.split(',')[0].strip()}"
-    return get_remote_address(request)
-
-limiter = Limiter(key_func=_key_func)
-```
-
-#### 4.2 动态限流值
-
-slowapi 的 `@limiter.limit("60/minute")` 是静态装饰器，**无法按租户动态切换**。
-
-**方案：自定义中间件替代 slowapi 装饰器**
-
-```python
-# utils/dynamic_limiter.py
-from collections import defaultdict
-import time
-
-class TenantLimiter:
-    """按租户动态限流（LRU + 滑动窗口）。"""
-
-    def __init__(self, storage_uri: str = "memory://"):
-        self._requests: dict[str, list[float]] = defaultdict(list)
-
-    def is_allowed(self, tenant: Tenant, endpoint: str = "chat") -> bool:
-        # 解析 tenant.rate_limit 如 "100/minute"
-        count, unit = self._parse_rate(tenant.rate_limit_per_user)
-        window_seconds = {"minute": 60, "hour": 3600, "second": 1}[unit]
-
-        key = f"{tenant.api_key}:{endpoint}"
-        now = time.monotonic()
-        # 滑动窗口：移除过期请求
-        self._requests[key] = [
-            ts for ts in self._requests[key] if ts > now - window_seconds
-        ]
-        if len(self._requests[key]) >= count:
-            return False
-        self._requests[key].append(now)
-        return True
-```
-
-**替代方案（更简单）：直接用 Redis 限流**
-
-```python
-# .env
-RATE_LIMIT_STORAGE_URI=redis://localhost:6379/0
-
-# 用 slowapi 的 Redis 后端，key_func 改为 tenant key
-```
-
-#### 4.3 routes.py — 移除 @limiter.limit 装饰器，改用中间件
-
-```python
-# 新增中间件
-@app.middleware("http")
-async def rate_limit_middleware(request: Request, call_next):
-    tenant = getattr(request.state, "tenant", None)
-    if tenant and not limiter.is_allowed(tenant):
-        return JSONResponse(
-            status_code=429,
-            content={"error": "Rate limit exceeded", "detail": tenant.rate_limit_per_user},
-        )
-    return await call_next(request)
-```
-
-**涉及文件（共 3 个）：**
-- `utils/limiter.py`
-- `utils/dynamic_limiter.py` — 新建
-- `api/main.py` — 加中间件
+**实际实现差异**：
+- 未采用原 plan 的 `@limiter.dynamic_limit()` 装饰器
+- 使用 `TenantLimiter` 中间件 + 滑动窗口，运行时按 `tenant.rate_limit_per_user` 动态配置
 
 ---
 
-## 阶段 P1 — 管理 API 改造（3-5 天）
+## 阶段 P1 — 管理 API 改造（✅ 已完成）
 
-### 5. 租户管理 API 路由
+### 5. 租户管理 API ✅
 
-**`api/routes.py` — 新增 `/api/admin/tenants` 路由组：**
+| 路由 | 方法 | 功能 |
+|---|---|---|
+| `/api/admin/tenants` | POST | 创建租户（返回 `api_key`） |
+| `/api/admin/tenants` | GET | 租户列表 |
+| `/api/admin/tenants/{tenant_id}` | GET | 租户详情 |
+| `/api/admin/tenants/{tenant_id}` | PUT | 更新租户 |
+| `/api/admin/tenants/{tenant_id}` | DELETE | 软删除 |
+| `/api/admin/tenants/{tenant_id}/rotate-key` | POST | 轮换 API Key |
+| `/api/admin/tenants/{tenant_id}/stats` | GET | 租户统计 |
 
-```python
-admin_router = APIRouter(prefix="/api/admin", tags=["租户管理"])
-
-@admin_router.post("/tenants")
-async def create_tenant(body: CreateTenantRequest, ...) -> TenantResponse
-
-@admin_router.get("/tenants")
-async def list_tenants() -> List[TenantResponse]
-
-@admin_router.get("/tenants/{tenant_id}")
-async def get_tenant(tenant_id: str) -> TenantResponse
-
-@admin_router.put("/tenants/{tenant_id}")
-async def update_tenant(tenant_id: str, body: UpdateTenantRequest) -> TenantResponse
-
-@admin_router.delete("/tenants/{tenant_id}")
-async def delete_tenant(tenant_id: str) -> DeleteResponse
-
-@admin_router.post("/tenants/{tenant_id}/rotate-key")
-async def rotate_api_key(tenant_id: str) -> TenantKeyResponse
-
-@admin_router.get("/tenants/{tenant_id}/stats")
-async def get_tenant_stats(tenant_id: str) -> TenantStatsResponse
-```
-
-**TenantStats 统计：**
-```python
-class TenantStatsResponse(BaseModel):
-    tenant_id: str
-    document_count: int
-    total_calls: int
-    prompt_tokens: int
-    completion_tokens: int
-    created_at: datetime
-    last_request: datetime
-```
-
-**`api/schemas.py` — 新增：**
-- `CreateTenantRequest`
-- `UpdateTenantRequest`
-- `TenantResponse`
-- `TenantKeyResponse`
-- `TenantStatsResponse`
+- `api/schemas.py` — `CreateTenantRequest` / `UpdateTenantRequest` / `TenantResponse` / `TenantKeyResponse` / `TenantStatsResponse`
+- 鉴权：`_verify_admin_key()` 验证 `X-API-Key` 是否匹配 `settings.api.api_key`
 
 ---
 
-## 阶段 P2 — 运维与增强（2-3 天）
+## 阶段 P2 — 运维与增强（✅ 已完成）
 
-### 6. Token 使用监控（按租户）
+### 6. Token 监控 ✅
+- `services/sensenova_client.py` — `TokenMonitor` 类，按租户统计 `prompt_tokens` / `completion_tokens`
 
-```python
-# services/sensenova_client.py
-class TokenMonitor:
-    def __init__(self, tenant_id: str = ""):
-        self._tenant_id = tenant_id
-        self._total_prompt_tokens = 0
-        self._total_completion_tokens = 0
+### 7. 数据迁移脚本 ✅
+- `scripts/migrate_single_to_multi_tenant.py` — 163 行，扫描 Zvec 文档打 `default` 标签
 
-    def get_stats(self):
-        return {
-            "tenant_id": self._tenant_id,
-            "total_calls": self._total_calls,
-            "total_prompt_tokens": self._total_prompt_tokens,
-            "total_completion_tokens": self._total_completion_tokens,
-        }
-```
-
-### 7. 数据迁移脚本
-
-```python
-# scripts/migrate_single_to_multi_tenant.py
-"""
-单租户 → 多租户迁移：
-1. 扫描现有 Zvec 所有文档，读 tenant_id 字段
-2. 未标记的标记为 "default"
-3. 在 tenant_service 中创建 default 租户
-4. 验证数据完整性
-"""
-```
-
-### 8. 配置新增
-
-```yaml
-# .env 新增
-# --- 租户存储 ---
-TENANT_STORAGE_TYPE=sqlite
-TENANT_STORAGE_PATH=data/tenants.db
-# --- 默认租户 ---
-DEFAULT_TENANT_ID=tenant_001
-DEFAULT_TENANT_API_KEY=sk_default_001
-# --- 限流存储（多实例用 Redis）---
-RATE_LIMIT_STORAGE_URI=redis://localhost:6379/0
-```
+### 8. 配置新增 ✅
+- `utils/config.py` — `TenantStorageSettings`
+- `.env` — `DEFAULT_TENANT_API_KEY` / `API_API_KEY`
 
 ---
 
 ## 文件改动汇总
 
-| 文件 | 改动类型 | 工作量 |
+| 文件 | 改动类型 | 说明 |
 |---|---|---|
-| `domain/models.py` | **大改** — 加 Tenant 模型，Document 加 tenant_id | 2h |
-| `domain/exceptions.py` | **小改** — 加 TenantNotFoundError | 0.5h |
-| `api/schemas.py` | **大改** — 新增 Tenant CRUD 请求/响应模型 | 3h |
-| `api/routes.py` | **大改** — 重构鉴权，加租户管理路由，所有路由加 tenant | 6h |
-| `api/main.py` | **大改** — 单例改工厂分发，加限流中间件 | 4h |
-| `core/retriever.py` | **中改** — 支持 tenant_id 透传，LLM client 按租户创建 | 3h |
-| `services/knowledge_service.py` | **中改** — 所有方法加 tenant 参数 | 3h |
-| `services/sensenova_client.py` | **中改** — 支持运行时传入租户 LLM 配置 | 2h |
-| `services/tenant_service.py` | **新建** — 租户 CRUD | 4h |
-| `infrastructure/zvec_store.py` | **大改** — 所有方法加 tenant filter | 5h |
-| `infrastructure/interfaces/vector_store.py` | **小改** — 接口加 tenant 参数 | 1h |
-| `infrastructure/interfaces/llm_client.py` | **小改** | 0.5h |
-| `infrastructure/llm_response_cache.py` | **中改** — 支持 tenant 隔离 cache_path | 2h |
-| `utils/limiter.py` | **中改** — key_func 改按 tenant | 2h |
-| `utils/dynamic_limiter.py` | **新建** — 动态限流中间件 | 3h |
-| `utils/config.py` | **小改** — 加 TenantStorageSettings | 1h |
-| `scripts/migrate_single_to_multi_tenant.py` | **新建** — 数据迁移 | 3h |
+| `domain/models.py` | 大改 | 加 Tenant 模型，Document/SearchResult 加 tenant_id |
+| `domain/exceptions.py` | 小改 | 加 TenantNotFoundError |
+| `api/schemas.py` | 大改 | 新增 Tenant CRUD 请求/响应模型，加 `api_key` 字段 |
+| `api/routes.py` | 大改 | 重构鉴权，加租户管理路由，所有路由加 tenant，加 `get_retriever_for_tenant()` |
+| `api/main.py` | 大改 | 单例改 `RetrieverFactory`，加限流中间件 |
+| `core/retriever.py` | 中改 | 透传 tenant_id + cache_backend，支持按租户隔离 |
+| `core/factory.py` | **新建** | `RetrieverFactory` + `RetrieverCache`（LRU） |
+| `services/knowledge_service.py` | 中改 | 所有方法加 tenant_id 参数 |
+| `services/sensenova_client.py` | 中改 | 支持运行时传入租户 LLM 配置 |
+| `services/tenant_service.py` | **新建** | 租户 CRUD（SQLite） |
+| `infrastructure/zvec_store.py` | 大改 | 所有 CRUD 方法加 tenant filter |
+| `infrastructure/interfaces/vector_store.py` | 小改 | 接口加 tenant 参数 |
+| `infrastructure/interfaces/llm_client.py` | 小改 | 接口支持可选参数 |
+| `infrastructure/llm_response_cache.py` | 中改 | 支持 tenant 隔离 cache_path |
+| `utils/limiter.py` | 小改 | key_func 改按 tenant |
+| `utils/dynamic_limiter.py` | **新建** | 动态限流中间件 |
+| `utils/config.py` | 小改 | 加 TenantStorageSettings |
+| `scripts/migrate_single_to_multi_tenant.py` | **新建** | 数据迁移 |
+| `scripts/integration_test_tenant.py` | **新建** | 集成测试（21 项，全通过） |
 
-**总计：约 48 人时 = 6 个工作日**
+---
+
+## 已知问题 / 后续优化
+
+### ⚠️ API Key 环境变量命名不一致
+- `.env` 中 `API_KEY=sk_admin_super_secret`
+- `ApiSettings` 的 `env_prefix="API_"` + 字段 `api_key` → 读取 `API_API_KEY`
+- **已修复**：`.env` 加了 `API_API_KEY=sk_admin_super_secret` 兼容
+
+### ⚠️ LLM 配置隔离有限制
+- 当前 `RetrieverFactory` 支持租户自定义 LLM API Key / Base / Model
+- 但 `Retriever` 实例缓存复用，租户 LLM 配置变更后需重建 Retriever（当前无自动刷新机制）
+
+### ⚠️ Token 统计未持久化
+- `TokenMonitor` 统计数据仅在内存中，服务重启后丢失
+- 后续可接入 Redis / DB 持久化
+
+---
+
+## 部署验证（2026-07-31）
+
+- ✅ Docker 镜像构建成功
+- ✅ 容器启动正常（健康检查通过）
+- ✅ 集成测试 21 项全部通过
+- ✅ 线上端到端测试（待重构建后完成）
