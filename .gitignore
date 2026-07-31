@@ -23,6 +23,7 @@ logs/
 # 数据库文件
 data/zvec/
 data/zvec_llm_cache/
+data/tenants.db
 
 # 备份文件
 *.tar.gz

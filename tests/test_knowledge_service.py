@@ -5,7 +5,7 @@ import pytest
 from unittest.mock import Mock, AsyncMock
 
 from src.services.knowledge_service import KnowledgeService
-from src.domain.models import Document
+from src.domain.models import Document, SearchResult
 from src.domain.exceptions import KnowledgeBaseError
 
 FAQ_DIR = "data/documents/faq"
@@ -91,7 +91,7 @@ async def test_delete_document(mock_services):
     result = await svc.delete_document("test-doc-id")
 
     assert result is True
-    mock_vector_store.adelete.assert_called_once_with("test-doc-id")
+    mock_vector_store.adelete.assert_called_once_with("test-doc-id", tenant_id="default")
 
 
 @pytest.mark.asyncio
@@ -108,9 +108,11 @@ async def test_search(mock_services):
     results = await svc.search("测试查询", top_k=5)
 
     assert len(results) == 1
-    assert isinstance(results[0], Document)
+    assert isinstance(results[0], SearchResult)
     mock_embedding_service.encode.assert_called_once_with("测试查询")
-    mock_vector_store.asearch.assert_called_once()
+    mock_vector_store.asearch.assert_called_once_with(
+        [0.1] * 384, top_k=5, tenant_id="default"
+    )
 
 
 @pytest.mark.asyncio
