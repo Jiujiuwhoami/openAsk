@@ -20,10 +20,8 @@ venv/
 *.log
 logs/
 
-# 数据库文件
-data/zvec/
-data/zvec_llm_cache/
-data/tenants.db
+# 数据库文件 + 测试/备份残留（整个 data/ 目录全部忽略）
+data/
 
 # 备份文件
 *.tar.gz

@@ -94,13 +94,21 @@ def e2e_app(tmp_path):
     app.include_router(admin_router)
 
     import src.api.routes as routes_mod
+    from src.utils.limiter import limiter as _global_limiter
 
-    with patch.object(routes_mod, "settings") as mock_settings:
-        mock_settings.api.api_key = ADMIN_KEY
-        mock_settings.tenant.default_tenant_api_key = DEFAULT_TENANT_KEY
-        with patch.object(routes_mod, "_tenant_service", svc):
-            with TestClient(app) as client:
-                yield client, svc
+    # 关闭 E2E 测试中的全局 limiter（避免 testclient IP 触发 5/minute 限流）
+    orig_enabled = _global_limiter.enabled
+    _global_limiter.enabled = False
+
+    try:
+        with patch.object(routes_mod, "settings") as mock_settings:
+            mock_settings.api.api_key = ADMIN_KEY
+            mock_settings.tenant.default_tenant_api_key = DEFAULT_TENANT_KEY
+            with patch.object(routes_mod, "_tenant_service", svc):
+                with TestClient(app) as client:
+                    yield client, svc
+    finally:
+        _global_limiter.enabled = orig_enabled
 
 
 @pytest.fixture()
@@ -113,7 +121,60 @@ def e2e_client(e2e_app):
 # ================================================================
 
 
-class TestAdminAuth:
+# ================================================================
+# 测试：Admin API 限流
+# ================================================================
+
+class TestAdminRateLimit:
+    """验证 Admin API 端点 5/minute 限流生效。"""
+
+    def test_admin_api_rate_limited(self, tmp_path):
+        """连续请求超过 5/minute 应返回 429。"""
+        tmp_db = str(tmp_path / "test_rl_tenants.db")
+        svc = TenantService(storage_path=tmp_db)
+        svc.ensure_default_tenant()
+
+        from src.utils.limiter import limiter
+        orig_enabled = limiter.enabled
+        limiter.enabled = True
+
+        try:
+            app = FastAPI(title="OpenAsk RL Test", version="1.0.0")
+            app.state.tenant_service = svc
+            app.state.retriever = type("MR", (), {"_llm_client": type("ML", (), {"is_configured": True})()})()
+            app.state.retriever_factory = type("MF", (), {"get_retriever_for_tenant": lambda *a, **kw: app.state.retriever})()
+            app.state.knowledge_service = AsyncMock()
+            app.state.vector_store = type("VS", (), {"acount": lambda *a, **kw: 0, "count": lambda *a, **kw: 0})()
+            app.state.embedding_service = type("ES", (), {"dimension": lambda *a, **kw: 384})()
+            app.state.limiter = limiter
+            app.state.tenant_limiter = type("TL", (), {"is_allowed": lambda *a, **kw: True})()
+            app.include_router(router)
+            app.include_router(admin_router)
+
+            import src.api.routes as routes_mod
+
+            with patch.object(routes_mod, "settings") as mock_settings:
+                mock_settings.api.api_key = ADMIN_KEY
+                mock_settings.tenant.default_tenant_api_key = DEFAULT_TENANT_KEY
+                with patch.object(routes_mod, "_tenant_service", svc):
+                    with TestClient(app) as client:
+                        # 前 5 次应该成功
+                        success = 0
+                        for i in range(7):
+                            resp = client.get(
+                                "/api/admin/tenants",
+                                headers={"X-API-Key": ADMIN_KEY},
+                            )
+                            if resp.status_code == 200:
+                                success += 1
+                            # 第 6 次开始应返回 429
+                            if i >= 5:
+                                assert resp.status_code == 429, (
+                                    f"Request {i} should be rate limited, got {resp.status_code}: {resp.text[:100]}"
+                                )
+                        assert success == 5
+        finally:
+            limiter.enabled = orig_enabled
     def test_list_tenants_with_valid_admin_key(self, e2e_client):
         resp = e2e_client.get(
             "/api/admin/tenants",

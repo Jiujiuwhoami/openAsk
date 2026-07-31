@@ -570,6 +570,7 @@ async def list_documents(
 # ------------------------------------------------------------------
 
 @admin_router.get("/tenants", response_model=list[TenantResponse])
+@limiter.limit("5/minute")
 async def list_tenants(request: Request):
     """租户列表（管理端）。"""
     _verify_admin_key(request)
@@ -595,6 +596,7 @@ async def list_tenants(request: Request):
 
 
 @admin_router.post("/tenants", response_model=TenantResponse)
+@limiter.limit("5/minute")
 async def create_tenant(request: Request, body: CreateTenantRequest):
     """创建租户（管理端）。"""
     _verify_admin_key(request)
@@ -628,6 +630,7 @@ async def create_tenant(request: Request, body: CreateTenantRequest):
 
 
 @admin_router.get("/tenants/{tenant_id}", response_model=TenantResponse)
+@limiter.limit("5/minute")
 async def get_tenant(request: Request, tenant_id: str):
     """获取租户详情（管理端）。"""
     _verify_admin_key(request)
@@ -652,6 +655,7 @@ async def get_tenant(request: Request, tenant_id: str):
 
 
 @admin_router.put("/tenants/{tenant_id}", response_model=TenantResponse)
+@limiter.limit("5/minute")
 async def update_tenant(request: Request, tenant_id: str, body: UpdateTenantRequest):
     """更新租户（管理端）。"""
     _verify_admin_key(request)
@@ -689,6 +693,7 @@ async def update_tenant(request: Request, tenant_id: str, body: UpdateTenantRequ
 
 
 @admin_router.delete("/tenants/{tenant_id}", response_model=DeleteResponse)
+@limiter.limit("5/minute")
 async def delete_tenant_endpoint(request: Request, tenant_id: str):
     """删除租户（管理端，软删除）。"""
     _verify_admin_key(request)
@@ -700,6 +705,7 @@ async def delete_tenant_endpoint(request: Request, tenant_id: str):
 
 
 @admin_router.post("/tenants/{tenant_id}/rotate-key", response_model=TenantKeyResponse)
+@limiter.limit("5/minute")
 async def rotate_api_key(request: Request, tenant_id: str):
     """轮换租户 API Key（管理端）。"""
     _verify_admin_key(request)
@@ -712,6 +718,7 @@ async def rotate_api_key(request: Request, tenant_id: str):
 
 
 @admin_router.get("/tenants/{tenant_id}/stats", response_model=TenantStatsResponse)
+@limiter.limit("5/minute")
 async def get_tenant_stats(request: Request, tenant_id: str):
     """获取租户统计（管理端）。"""
     _verify_admin_key(request)
