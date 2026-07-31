@@ -5,7 +5,7 @@
 """
 
 import asyncio
-from typing import AsyncGenerator, List, Optional
+from typing import Any, AsyncGenerator, List, Optional
 
 import numpy as np
 
@@ -120,11 +120,15 @@ class Retriever:
         self._llm_client = llm_client
         self._reranker = reranker
         self._embedding_cache = embedding_cache
+        self._system_prompt: Optional[str] = None
 
     async def retrieve(
         self,
         query: str,
         top_k: int = 5,
+        system_prompt: Optional[str] = None,
+        tenant_id: str = "default",
+        cache_backend: Optional[CacheBackend] = None,
     ) -> RetrievalResult:
         """执行检索，返回回答和来源（异步）。
 
@@ -135,6 +139,8 @@ class Retriever:
         Returns:
             RetrievalResult：包含回答、来源、缓存命中状态
         """
+        effective_prompt = system_prompt or self._system_prompt
+
         if not query.strip():
             logger.warning("空查询，直接返回")
             return RetrievalResult(
@@ -151,10 +157,10 @@ class Retriever:
                 llm_used=False,
             )
 
-        cached_answer = await self._check_cache(query_vector)
+        cached_answer = await self._check_cache(query_vector, cache_backend=cache_backend)
         if cached_answer:
             logger.debug("缓存命中，直接返回")
-            sources = await self._get_sources_for_cache(query_vector, top_k)
+            sources = await self._get_sources_for_cache(query_vector, top_k, tenant_id=tenant_id)
             return RetrievalResult(
                 answer=cached_answer,
                 sources=sources,
@@ -168,7 +174,7 @@ class Retriever:
                 if self._reranker and self._reranker.is_enabled
                 else top_k
             )
-            search_results = await self._vector_search(query_vector, recall_top_k)
+            search_results = await self._vector_search(query_vector, recall_top_k, tenant_id=tenant_id)
         except VectorStoreError as e:
             logger.error(f"向量检索失败: {e}")
             return RetrievalResult(
@@ -196,8 +202,8 @@ class Retriever:
             except Exception as e:
                 logger.warning(f"重排序失败，降级为不重排序: {e}")
 
-        answer = await self._generate_answer(query, search_results)
-        await self._cache_result(query_vector, answer)
+        answer = await self._generate_answer(query, search_results, system_prompt=effective_prompt)
+        await self._cache_result(query_vector, answer, cache_backend=cache_backend)
 
         logger.info(f"查询: '{query[:100]}' | 回答: {len(answer)} 字符 | 来源: {len(search_results)} 篇")
         return RetrievalResult(
@@ -212,6 +218,9 @@ class Retriever:
         self,
         query: str,
         top_k: int = 5,
+        system_prompt: Optional[str] = None,
+        tenant_id: str = "default",
+        cache_backend: Optional[CacheBackend] = None,
     ) -> AsyncGenerator[dict, None]:
         """流式检索，逐事件返回结果（异步生成器）。
 
@@ -224,6 +233,7 @@ class Retriever:
         Args:
             query: 用户查询文本
             top_k: 返回的最相关文档数量
+            system_prompt: 租户自定义系统 Prompt
 
         Yields:
             事件字典: {"event": str, "data": ...}
@@ -241,10 +251,10 @@ class Retriever:
             yield {"event": "done", "data": None}
             return
 
-        cached_answer = await self._check_cache(query_vector)
+        cached_answer = await self._check_cache(query_vector, cache_backend=cache_backend)
         if cached_answer:
             logger.debug("缓存命中，直接返回")
-            sources = await self._get_sources_for_cache(query_vector, top_k)
+            sources = await self._get_sources_for_cache(query_vector, top_k, tenant_id=tenant_id)
             sources_data = [
                 {
                     "doc_id": s.doc_id,
@@ -266,7 +276,7 @@ class Retriever:
                 if self._reranker and self._reranker.is_enabled
                 else top_k
             )
-            search_results = await self._vector_search(query_vector, recall_top_k)
+            search_results = await self._vector_search(query_vector, recall_top_k, tenant_id=tenant_id)
         except VectorStoreError as e:
             logger.error(f"向量检索失败: {e}")
             yield {"event": "error", "data": "无法检索到相关信息，请稍后重试"}
@@ -303,6 +313,7 @@ class Retriever:
         yield {"event": "sources", "data": sources_data}
         yield {"event": "cache_hit", "data": False}
 
+        effective_prompt = system_prompt or self._system_prompt
         answer_chunks: list[str] = []
         try:
             context = self._build_context(search_results)
@@ -312,21 +323,25 @@ class Retriever:
                 answer_chunks.append(fallback)
             else:
                 if hasattr(self._llm_client, "stream_answer"):
-                    async for chunk in self._llm_client.stream_answer(query, context):
+                    async for chunk in self._llm_client.stream_answer(
+                        query, context, system_prompt=effective_prompt
+                    ):
                         if chunk["type"] == "reasoning":
                             yield {"event": "reasoning_delta", "data": chunk["content"]}
                         elif chunk["type"] == "content":
                             answer_chunks.append(chunk["content"])
                             yield {"event": "answer_delta", "data": chunk["content"]}
                 else:
-                    answer = await self._llm_client.generate_answer(query, context)
+                    answer = await self._llm_client.generate_answer(
+                        query, context, system_prompt=effective_prompt
+                    )
                     answer_chunks.append(answer)
                     yield {"event": "answer_delta", "data": answer}
 
             full_answer = "".join(answer_chunks)
             logger.info(f"[流式] 查询: '{query[:100]}' | 回答: {len(full_answer)} 字符 | 来源: {len(search_results)} 篇")
             logger.debug(f"LLM 流式生成完成，长度: {len(full_answer)}")
-            await self._cache_result(query_vector, full_answer)
+            await self._cache_result(query_vector, full_answer, cache_backend=cache_backend)
 
         except SenseNovaAPIError as e:
             logger.error(f"LLM 调用失败，降级为返回原始文档: {e}")
@@ -357,22 +372,23 @@ class Retriever:
 
         return vec
 
-    async def _check_cache(self, query_vector: np.ndarray) -> Optional[str]:
+    async def _check_cache(self, query_vector: np.ndarray, cache_backend: Optional[CacheBackend] = None) -> Optional[str]:
         """检查缓存是否命中（异步）。"""
         try:
-            if hasattr(self._cache_backend, "aget"):
-                return await self._cache_backend.aget(query_vector)
-            return self._cache_backend.get(query_vector)
+            backend = cache_backend or self._cache_backend
+            if hasattr(backend, "aget"):
+                return await backend.aget(query_vector)
+            return backend.get(query_vector)
         except Exception as e:
             logger.warning(f"缓存查询失败，降级为直接检索: {e}")
             return None
 
-    async def _get_sources_for_cache(self, query_vector: np.ndarray, top_k: int) -> List[SearchResult]:
-        """缓存命中时，获取来源文档（用于引用展示，异步）。"""
+    async def _get_sources_for_cache(self, query_vector: np.ndarray, top_k: int, tenant_id: str = "default") -> List[SearchResult]:
+        """缓存命中时，获取来源文档（用于引用展示，异步）。自动按 tenant_id 过滤。"""
         try:
             if hasattr(self._vector_store, "asearch"):
-                return await self._vector_store.asearch(query_vector, top_k=top_k)
-            return self._vector_store.search(query_vector, top_k=top_k)
+                return await self._vector_store.asearch(query_vector, top_k=top_k, tenant_id=tenant_id)
+            return self._vector_store.search(query_vector, top_k=top_k, tenant_id=tenant_id)
         except Exception as e:
             logger.warning(f"缓存命中但获取来源失败: {e}")
             return []
@@ -381,11 +397,12 @@ class Retriever:
         self,
         query_vector: np.ndarray,
         top_k: int,
+        tenant_id: str = "default",
     ) -> List[SearchResult]:
-        """执行向量检索，返回最相关的文档（异步）。"""
+        """执行向量检索，返回最相关的文档（异步）。自动按 tenant_id 过滤。"""
         if hasattr(self._vector_store, "asearch"):
-            return await self._vector_store.asearch(query_vector, top_k=top_k)
-        return self._vector_store.search(query_vector, top_k=top_k)
+            return await self._vector_store.asearch(query_vector, top_k=top_k, tenant_id=tenant_id)
+        return self._vector_store.search(query_vector, top_k=top_k, tenant_id=tenant_id)
 
     def _build_context(self, search_results: List[SearchResult]) -> List[str]:
         """从检索结果构建上下文列表。"""
@@ -401,6 +418,7 @@ class Retriever:
         self,
         query: str,
         search_results: List[SearchResult],
+        system_prompt: Optional[str] = None,
     ) -> str:
         """基于检索结果生成回答（异步）。
 
@@ -411,7 +429,9 @@ class Retriever:
             return "\n\n".join([r.title for r in search_results if r.title]) or "未找到相关信息"
 
         try:
-            answer = await self._llm_client.generate_answer(query, context)
+            answer = await self._llm_client.generate_answer(
+                query, context, system_prompt=system_prompt
+            )
             logger.debug(f"LLM 生成回答成功，长度: {len(answer)}")
             return answer
         except SenseNovaAPIError as e:
@@ -436,13 +456,14 @@ class Retriever:
             return "\n\n".join(pieces)
         return "未找到相关信息"
 
-    async def _cache_result(self, query_vector: np.ndarray, answer: str) -> None:
+    async def _cache_result(self, query_vector: np.ndarray, answer: str, cache_backend: Optional[CacheBackend] = None) -> None:
         """将结果写入缓存（异步）。"""
         try:
-            if hasattr(self._cache_backend, "aset"):
-                await self._cache_backend.aset(query_vector, answer)
+            backend = cache_backend or self._cache_backend
+            if hasattr(backend, "aset"):
+                await backend.aset(query_vector, answer)
             else:
-                self._cache_backend.set(query_vector, answer)
+                backend.set(query_vector, answer)
             logger.debug("结果已写入缓存")
         except Exception as e:
             logger.warning(f"缓存写入失败: {e}")

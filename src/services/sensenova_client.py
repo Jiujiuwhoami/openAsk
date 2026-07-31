@@ -19,21 +19,23 @@ class PromptBuilder:
     """Prompt 构建器：根据上下文和查询构建合适的 Prompt。"""
 
     @classmethod
-    def build_qa_prompt(cls, query: str, context: List[str]) -> str:
+    def build_qa_prompt(cls, query: str, context: List[str], system_prompt: Optional[str] = None) -> str:
         """构建问答 Prompt。
 
         Args:
             query: 用户查询
             context: 检索到的上下文内容列表
-
-        Returns:
-            完整的 Prompt 文本
+            system_prompt: 租户自定义系统 Prompt，为 None 时不使用前缀
         """
         context_text = "\n\n".join(
             [f"<doc index=\"{i + 1}\">\n{c.strip()}\n</doc>" for i, c in enumerate(context)]
         )
 
-        return f"""你是一位专业的知识库问答助手。你的任务是基于提供的参考资料，用中文回答用户的问题。
+        default_instructions = (
+            "你是一位专业的知识库问答助手。你的任务是基于提供的参考资料，用中文回答用户的问题。"
+        )
+
+        return f"""{system_prompt or default_instructions}
 
 <instructions>
 ## 角色与任务
@@ -236,22 +238,28 @@ class SenseNovaClient(LLMClient):
         except KeyError as e:
             raise SenseNovaAPIError(f"API 返回格式错误: {e}")
 
-    async def generate_answer(self, query: str, context: List[str]) -> str:
+    async def generate_answer(
+        self, query: str, context: List[str], system_prompt: Optional[str] = None
+    ) -> str:
         """根据上下文生成回答（异步）。"""
-        prompt = PromptBuilder.build_qa_prompt(query, context)
+        prompt = PromptBuilder.build_qa_prompt(query, context, system_prompt=system_prompt)
         return await self.complete(prompt)
 
     async def stream_answer(
-        self, query: str, context: List[str]
+        self,
+        query: str,
+        context: List[str],
+        system_prompt: Optional[str] = None,
     ) -> AsyncGenerator[str, None]:
         """流式生成回答（异步生成器）。
 
         使用 SSE（Server-Sent Events）协议逐 token 返回文本增量。
-        兼容 OpenAI 格式的流式响应。
+        兼容 OpenAI 格式的流式响应。支持自定义 system_prompt。
 
         Args:
             query: 用户查询
             context: 上下文片段列表
+            system_prompt: 租户自定义系统 Prompt
 
         Yields:
             回答文本增量（通常是 token 级别）
@@ -259,7 +267,7 @@ class SenseNovaClient(LLMClient):
         if not self._api_key:
             raise SenseNovaAPIError("SenseNova API Key 未配置")
 
-        prompt = PromptBuilder.build_qa_prompt(query, context)
+        prompt = PromptBuilder.build_qa_prompt(query, context, system_prompt=system_prompt)
         url = f"{self._api_base}/chat/completions"
         payload = self._build_payload(prompt, max_tokens=2048)
         payload["stream"] = True

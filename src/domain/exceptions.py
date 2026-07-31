@@ -34,3 +34,18 @@ class SenseNovaAPIError(AppError):
 class MultiModalError(AppError):
     """多模态服务调用异常。"""
     pass
+
+
+class TenantError(AppError):
+    """租户相关异常。"""
+    pass
+
+
+class TenantNotFoundError(TenantError):
+    """租户不存在。"""
+    pass
+
+
+class TenantSuspendedError(TenantError):
+    """租户已暂停，禁止使用。"""
+    pass

@@ -68,6 +68,10 @@ class LLMResponseCache(CacheBackend):
     def _init_collection(self) -> None:
         """初始化 Zvec 缓存集合：存在则打开，否则创建。"""
         try:
+            # 确保 cache_path 父目录存在（按租户隔离时路径为 data/zvec_llm_cache/<tenant_id>）
+            cache_parent = os.path.dirname(self._cache_path)
+            if cache_parent and not os.path.exists(cache_parent):
+                os.makedirs(cache_parent, exist_ok=True)
             if os.path.exists(self._cache_path):
                 existing_files = os.listdir(self._cache_path)
                 if existing_files:

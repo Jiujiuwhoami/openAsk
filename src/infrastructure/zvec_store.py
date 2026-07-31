@@ -9,7 +9,7 @@ import numpy as np
 import zvec
 
 from src.domain.exceptions import VectorStoreError
-from src.domain.models import Document, SearchResult
+from src.domain.models import DEFAULT_TENANT_ID, Document, SearchResult
 from src.infrastructure.interfaces.vector_store import VectorStore
 from src.utils.config import settings
 from src.utils.logger import get_logger
@@ -122,10 +122,35 @@ class ZvecStore(VectorStore):
                     data_type=zvec.DataType.STRING,
                     nullable=True,
                 ),
+                zvec.FieldSchema(
+                    name="tenant_id",
+                    data_type=zvec.DataType.STRING,
+                    nullable=False,
+                    index_param=zvec.InvertIndexParam(),
+                ),
             ],
         )
 
-    def insert(self, doc: Document, dense_vector: np.ndarray) -> None:
+    def _build_tenant_filter(
+        self,
+        tenant_id: str = DEFAULT_TENANT_ID,
+        extra_filter: Optional[str] = None,
+    ) -> Optional[str]:
+        """构建带租户隔离的 filter 表达式。
+
+        Args:
+            tenant_id: 租户 ID
+            extra_filter: 已有 filter，用 AND 拼接
+
+        Returns:
+            组合后的 filter 表达式，或 None（无 filter）
+        """
+        tid_filter = f"tenant_id = '{tenant_id}'"
+        if extra_filter:
+            return f"({tid_filter}) AND ({extra_filter})"
+        return tid_filter
+
+    def insert(self, doc: Document, dense_vector: np.ndarray, tenant_id: str = DEFAULT_TENANT_ID) -> None:
         """插入文档到向量库（同步）。"""
         try:
             with self._lock:
@@ -143,19 +168,22 @@ class ZvecStore(VectorStore):
                             "created_at": doc.created_at,
                             "updated_at": doc.updated_at,
                             "source": doc.source or "",
+                            "tenant_id": doc.tenant_id or tenant_id,
                         },
                     )
                 )
-            logger.debug(f"文档已插入: {doc.doc_id}")
+            logger.debug(f"文档已插入: {doc.doc_id} (tenant={doc.tenant_id or tenant_id})")
         except Exception as e:
             logger.error(f"插入文档失败: {doc.doc_id} | {e}", exc_info=True)
             raise VectorStoreError(f"Failed to insert document: {e}")
 
-    async def ainsert(self, doc: Document, dense_vector: np.ndarray) -> None:
+    async def ainsert(
+        self, doc: Document, dense_vector: np.ndarray, tenant_id: str = DEFAULT_TENANT_ID
+    ) -> None:
         """插入文档到向量库（异步）。"""
-        await asyncio.to_thread(self.insert, doc, dense_vector)
+        await asyncio.to_thread(self.insert, doc, dense_vector, tenant_id)
 
-    def upsert(self, doc: Document, dense_vector: np.ndarray) -> None:
+    def upsert(self, doc: Document, dense_vector: np.ndarray, tenant_id: str = DEFAULT_TENANT_ID) -> None:
         """更新或插入文档到向量库（同步）。"""
         try:
             with self._lock:
@@ -173,41 +201,53 @@ class ZvecStore(VectorStore):
                             "created_at": doc.created_at,
                             "updated_at": doc.updated_at,
                             "source": doc.source or "",
+                            "tenant_id": doc.tenant_id or tenant_id,
                         },
                     )
                 )
-            logger.debug(f"文档已 upsert: {doc.doc_id}")
+            logger.debug(f"文档已 upsert: {doc.doc_id} (tenant={doc.tenant_id or tenant_id})")
         except Exception as e:
             logger.error(f"Upsert 文档失败: {doc.doc_id} | {e}", exc_info=True)
             raise VectorStoreError(f"Failed to upsert document: {e}")
 
-    async def aupsert(self, doc: Document, dense_vector: np.ndarray) -> None:
+    async def aupsert(
+        self, doc: Document, dense_vector: np.ndarray, tenant_id: str = DEFAULT_TENANT_ID
+    ) -> None:
         """更新或插入文档到向量库（异步）。"""
-        await asyncio.to_thread(self.upsert, doc, dense_vector)
+        await asyncio.to_thread(self.upsert, doc, dense_vector, tenant_id)
 
-    def delete(self, doc_id: str) -> bool:
-        """删除指定文档（同步）。"""
+    def delete(self, doc_id: str, tenant_id: str = DEFAULT_TENANT_ID) -> bool:
+        """删除指定文档（同步）。先按 tenant_id 验证归属。"""
         try:
             with self._lock:
                 self._ensure_collection()
+                # 验证文档属于当前租户（防止跨租户删除）
+                existing = self.get(doc_id, tenant_id)
+                if not existing:
+                    logger.warning(f"文档不存在或不属于当前租户: {doc_id} (tenant={tenant_id})")
+                    return False
                 self._collection.delete(ids=[doc_id])
-            logger.debug(f"文档已删除: {doc_id}")
+            logger.debug(f"文档已删除: {doc_id} (tenant={tenant_id})")
             return True
         except Exception as e:
             logger.error(f"删除文档失败: {doc_id} | {e}", exc_info=True)
             raise VectorStoreError(f"Failed to delete document: {e}")
 
-    async def adelete(self, doc_id: str) -> bool:
+    async def adelete(self, doc_id: str, tenant_id: str = DEFAULT_TENANT_ID) -> bool:
         """删除指定文档（异步）。"""
-        return await asyncio.to_thread(self.delete, doc_id)
+        return await asyncio.to_thread(self.delete, doc_id, tenant_id)
 
     def search(
         self,
         query_vector: np.ndarray,
         top_k: int = 5,
         filter_expr: Optional[str] = None,
+        tenant_id: str = DEFAULT_TENANT_ID,
     ) -> List[SearchResult]:
-        """向量检索，返回 top-K 最相似的文档（同步）。"""
+        """向量检索，返回 top-K 最相似的文档（同步）。
+
+        自动按 tenant_id 过滤，仅返回当前租户的文档。
+        """
         try:
             with self._lock:
                 self._ensure_collection()
@@ -215,11 +255,12 @@ class ZvecStore(VectorStore):
                     field_name="dense_embedding",
                     vector=query_vector,
                 )
-                if filter_expr:
+                effective_filter = self._build_tenant_filter(tenant_id, filter_expr)
+                if effective_filter:
                     results = self._collection.query(
                         queries=vector_query,
                         topk=top_k,
-                        filter=filter_expr,
+                        filter=effective_filter,
                     )
                 else:
                     results = self._collection.query(queries=vector_query, topk=top_k)
@@ -233,6 +274,7 @@ class ZvecStore(VectorStore):
                         content=r.fields.get("content", ""),
                         title=r.fields.get("title", ""),
                         tags=r.fields.get("tags", []),
+                        tenant_id=r.fields.get("tenant_id", DEFAULT_TENANT_ID),
                     )
                 )
             return search_results
@@ -245,19 +287,24 @@ class ZvecStore(VectorStore):
         query_vector: np.ndarray,
         top_k: int = 5,
         filter_expr: Optional[str] = None,
+        tenant_id: str = DEFAULT_TENANT_ID,
     ) -> List[SearchResult]:
         """向量检索，返回 top-K 最相似的文档（异步）。"""
-        return await asyncio.to_thread(self.search, query_vector, top_k, filter_expr)
+        return await asyncio.to_thread(
+            self.search, query_vector, top_k, filter_expr, tenant_id
+        )
 
     def batch_search(
         self,
         query_vectors: List[np.ndarray],
         top_k: int = 5,
         filter_expr: Optional[str] = None,
+        tenant_id: str = DEFAULT_TENANT_ID,
     ) -> List[List[SearchResult]]:
         """批量向量检索（同步）。
 
         在单次加锁内执行多次检索，减少锁竞争和 I/O 开销。
+        自动按 tenant_id 过滤，仅返回当前租户的文档。
         """
         if not query_vectors:
             return []
@@ -265,16 +312,17 @@ class ZvecStore(VectorStore):
             all_search_results = []
             with self._lock:
                 self._ensure_collection()
+                effective_filter = self._build_tenant_filter(tenant_id, filter_expr)
                 for query_vector in query_vectors:
                     vector_query = zvec.Query(
                         field_name="dense_embedding",
                         vector=query_vector,
                     )
-                    if filter_expr:
+                    if effective_filter:
                         results = self._collection.query(
                             queries=vector_query,
                             topk=top_k,
-                            filter=filter_expr,
+                            filter=effective_filter,
                         )
                     else:
                         results = self._collection.query(
@@ -289,6 +337,7 @@ class ZvecStore(VectorStore):
                                 content=r.fields.get("content", ""),
                                 title=r.fields.get("title", ""),
                                 tags=r.fields.get("tags", []),
+                                tenant_id=r.fields.get("tenant_id", DEFAULT_TENANT_ID),
                             )
                         )
                     all_search_results.append(search_results)
@@ -303,19 +352,22 @@ class ZvecStore(VectorStore):
         query_vectors: List[np.ndarray],
         top_k: int = 5,
         filter_expr: Optional[str] = None,
+        tenant_id: str = DEFAULT_TENANT_ID,
     ) -> List[List[SearchResult]]:
         """批量向量检索（异步）。"""
         return await asyncio.to_thread(
-            self.batch_search, query_vectors, top_k, filter_expr
+            self.batch_search, query_vectors, top_k, filter_expr, tenant_id
         )
 
-    def get(self, doc_id: str) -> Optional[Document]:
-        """根据文档 ID 获取文档（同步）。"""
+    def get(
+        self, doc_id: str, tenant_id: str = DEFAULT_TENANT_ID
+    ) -> Optional[Document]:
+        """根据文档 ID 获取文档（同步）。自动按 tenant_id 过滤。"""
         try:
             with self._lock:
                 self._ensure_collection()
                 results = self._collection.query(
-                    filter=f"doc_id = '{doc_id}'",
+                    filter=self._build_tenant_filter(tenant_id, f"doc_id = '{doc_id}'"),
                     topk=1,
                 )
                 if not results:
@@ -327,6 +379,7 @@ class ZvecStore(VectorStore):
                     title=r.fields.get("title", ""),
                     tags=r.fields.get("tags", []),
                     source=r.fields.get("source", ""),
+                    tenant_id=r.fields.get("tenant_id", DEFAULT_TENANT_ID),
                     created_at=r.fields.get("created_at", 0),
                     updated_at=r.fields.get("updated_at", 0),
                 )
@@ -334,21 +387,24 @@ class ZvecStore(VectorStore):
             logger.error(f"获取文档失败: {doc_id} | {e}", exc_info=True)
             raise VectorStoreError(f"Failed to get document: {e}")
 
-    async def aget(self, doc_id: str) -> Optional[Document]:
+    async def aget(
+        self, doc_id: str, tenant_id: str = DEFAULT_TENANT_ID
+    ) -> Optional[Document]:
         """根据文档 ID 获取文档（异步）。"""
-        return await asyncio.to_thread(self.get, doc_id)
+        return await asyncio.to_thread(self.get, doc_id, tenant_id)
 
-    def list(self) -> List[Document]:
-        """列出所有文档（按创建时间降序，同步）。"""
+    def list(self, tenant_id: str = DEFAULT_TENANT_ID) -> List[Document]:
+        """列出所有文档（按创建时间降序，同步）。自动按 tenant_id 过滤。"""
         try:
             with self._lock:
                 self._ensure_collection()
                 all_docs = []
+                effective_filter = self._build_tenant_filter(tenant_id, "status = 'active'")
                 count = self._collection.stats.doc_count
                 if count == 0:
                     return []
                 results = self._collection.query(
-                    filter="status = 'active'",
+                    filter=effective_filter,
                     topk=min(count, 1000),
                 )
                 for r in results:
@@ -359,6 +415,7 @@ class ZvecStore(VectorStore):
                             title=r.fields.get("title", ""),
                             tags=r.fields.get("tags", []),
                             source=r.fields.get("source", ""),
+                            tenant_id=r.fields.get("tenant_id", DEFAULT_TENANT_ID),
                             created_at=r.fields.get("created_at", 0),
                             updated_at=r.fields.get("updated_at", 0),
                         )
@@ -369,12 +426,14 @@ class ZvecStore(VectorStore):
             logger.error(f"列出文档失败: {e}", exc_info=True)
             raise VectorStoreError(f"Failed to list documents: {e}")
 
-    async def alist(self) -> List[Document]:
+    async def alist(self, tenant_id: str = DEFAULT_TENANT_ID) -> List[Document]:
         """列出所有文档（按创建时间降序，异步）。"""
-        return await asyncio.to_thread(self.list)
+        return await asyncio.to_thread(self.list, tenant_id)
 
-    def list_paginated(self, page: int = 1, page_size: int = 10) -> List[Document]:
-        """分页列出文档（同步）。
+    def list_paginated(
+        self, page: int = 1, page_size: int = 10, tenant_id: str = DEFAULT_TENANT_ID
+    ) -> List[Document]:
+        """分页列出文档（同步）。自动按 tenant_id 过滤。
 
         全量加载后按创建时间降序排序并切片，避免依赖 Zvec 默认顺序导致的游标错乱。
         知识库文档总量通常不超过数千，全量加载在内存和性能上均可行。
@@ -382,6 +441,7 @@ class ZvecStore(VectorStore):
         Args:
             page: 页码，从1开始
             page_size: 每页大小
+            tenant_id: 租户 ID
 
         Returns:
             当前页的文档列表，按创建时间降序排列
@@ -389,6 +449,7 @@ class ZvecStore(VectorStore):
         try:
             with self._lock:
                 self._ensure_collection()
+                effective_filter = self._build_tenant_filter(tenant_id, "status = 'active'")
                 count = self._collection.stats.doc_count
                 if count == 0:
                     return []
@@ -397,9 +458,9 @@ class ZvecStore(VectorStore):
                 if start >= count:
                     return []
 
-                # 获取全部 active 文档
+                # 获取全部 active 文档（含 tenant 过滤）
                 all_results = self._collection.query(
-                    filter="status = 'active'",
+                    filter=effective_filter,
                     topk=min(count, 1000),
                 )
 
@@ -412,6 +473,7 @@ class ZvecStore(VectorStore):
                             title=r.fields.get("title", ""),
                             tags=r.fields.get("tags", []),
                             source=r.fields.get("source", ""),
+                            tenant_id=r.fields.get("tenant_id", DEFAULT_TENANT_ID),
                             created_at=r.fields.get("created_at", 0),
                             updated_at=r.fields.get("updated_at", 0),
                         )
@@ -424,23 +486,33 @@ class ZvecStore(VectorStore):
             logger.error(f"分页列出文档失败: {e}", exc_info=True)
             raise VectorStoreError(f"Failed to list documents: {e}")
 
-    async def alist_paginated(self, page: int = 1, page_size: int = 10) -> List[Document]:
+    async def alist_paginated(
+        self, page: int = 1, page_size: int = 10, tenant_id: str = DEFAULT_TENANT_ID
+    ) -> List[Document]:
         """分页列出文档（异步）。"""
-        return await asyncio.to_thread(self.list_paginated, page, page_size)
+        return await asyncio.to_thread(self.list_paginated, page, page_size, tenant_id)
 
-    def count(self) -> int:
-        """返回当前文档总数（同步）。"""
+    def count(self, tenant_id: str = DEFAULT_TENANT_ID) -> int:
+        """返回当前文档总数（同步）。自动按 tenant_id 过滤。"""
         try:
             with self._lock:
                 self._ensure_collection()
-                return self._collection.stats.doc_count
+                if tenant_id == DEFAULT_TENANT_ID:
+                    return self._collection.stats.doc_count
+                # 精确计数：查询过滤后统计（Zvec 单次 topk 上限 100000）
+                max_topk = 100000
+                results = self._collection.query(
+                    filter=self._build_tenant_filter(tenant_id, "status = 'active'"),
+                    topk=max_topk,
+                )
+                return len(results)
         except Exception as e:
             logger.error(f"获取文档计数失败: {e}", exc_info=True)
             raise VectorStoreError(f"Failed to count: {e}")
 
-    async def acount(self) -> int:
+    async def acount(self, tenant_id: str = DEFAULT_TENANT_ID) -> int:
         """返回当前文档总数（异步）。"""
-        return await asyncio.to_thread(self.count)
+        return await asyncio.to_thread(self.count, tenant_id)
 
     def close(self) -> None:
         """关闭并释放 Zvec 集合资源（同步）。"""

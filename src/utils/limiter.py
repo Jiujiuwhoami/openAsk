@@ -3,12 +3,12 @@
 # 但 .env 是 UTF-8 含中文，会导致 UnicodeDecodeError。
 # 在 import slowapi 之前 monkeypatch Config._read_file，强制使用 UTF-8。
 original_read_file = None
-def _read_file_utf8(self, file_name):
+def _read_file_utf8(self, file_name, encoding="utf-8"):
     from pathlib import Path
     file_values = {}
     path = Path(file_name)
     if path.exists():
-        with open(path, encoding="utf-8") as f:
+        with open(path, encoding=encoding) as f:
             for line in f:
                 line = line.strip()
                 if "=" in line and not line.startswith("#"):

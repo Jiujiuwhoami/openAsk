@@ -134,3 +134,74 @@ class DeleteResponse(BaseModel):
 
     success: bool = Field(..., description="是否成功")
     message: str = Field(..., description="提示信息")
+
+
+# ================================================================
+# 租户管理 Schema
+# ================================================================
+
+
+class TenantResponse(BaseModel):
+    """租户响应模型。"""
+
+    tenant_id: str = Field(..., description="租户 ID")
+    api_key: str = Field("", description="API Key（创建时返回）")
+    name: str = Field(..., description="租户名称")
+    status: str = Field(..., description="租户状态: active / suspended / trial / deleted")
+    llm_api_base: str = Field("", description="LLM API Base")
+    llm_model: str = Field("", description="LLM 模型")
+    llm_timeout: int = Field(30, description="LLM 超时秒数")
+    rate_limit_per_user: str = Field("60/minute", description="每用户限流")
+    rate_limit_global: str = Field("1000/minute", description="全局限流")
+    system_prompt: str = Field("", description="自定义系统 Prompt")
+    created_at: int = Field(..., description="创建时间戳")
+    updated_at: int = Field(..., description="更新时间戳")
+
+
+class CreateTenantRequest(BaseModel):
+    """创建租户请求模型。"""
+
+    name: str = Field(..., description="租户名称", min_length=1, max_length=200)
+    status: str = Field("active", description="租户状态", pattern="^(active|suspended|trial)$")
+    knowledge_path: str = Field("", description="知识库路径")
+    llm_api_key: str = Field("", description="租户 LLM API Key")
+    llm_api_base: str = Field("", description="LLM API Base")
+    llm_model: str = Field("", description="LLM 模型")
+    llm_timeout: int = Field(30, ge=5, le=120, description="LLM 超时秒数")
+    rate_limit_per_user: str = Field("60/minute", description="每用户限流")
+    rate_limit_global: str = Field("1000/minute", description="全局限流")
+    system_prompt: str = Field("", description="自定义系统 Prompt")
+
+
+class UpdateTenantRequest(BaseModel):
+    """更新租户请求模型。"""
+
+    name: Optional[str] = Field(None, description="租户名称", min_length=1, max_length=200)
+    status: Optional[str] = Field(None, description="租户状态", pattern="^(active|suspended|trial|deleted)$")
+    knowledge_path: Optional[str] = Field(None, description="知识库路径")
+    llm_api_key: Optional[str] = Field(None, description="租户 LLM API Key")
+    llm_api_base: Optional[str] = Field(None, description="LLM API Base")
+    llm_model: Optional[str] = Field(None, description="LLM 模型")
+    llm_timeout: Optional[int] = Field(None, ge=5, le=120, description="LLM 超时秒数")
+    rate_limit_per_user: Optional[str] = Field(None, description="每用户限流")
+    rate_limit_global: Optional[str] = Field(None, description="全局限流")
+    system_prompt: Optional[str] = Field(None, description="自定义系统 Prompt")
+
+
+class TenantKeyResponse(BaseModel):
+    """租户 Key 响应模型。"""
+
+    api_key: str = Field(..., description="新 API Key")
+
+
+class TenantStatsResponse(BaseModel):
+    """租户统计响应模型。"""
+
+    tenant_id: str = Field(..., description="租户 ID")
+    document_count: int = Field(0, description="文档数")
+    total_calls: int = Field(0, description="总调用次数")
+    prompt_tokens: int = Field(0, description="输入 Token 总数")
+    completion_tokens: int = Field(0, description="输出 Token 总数")
+    cache_hit_rate: float = Field(0.0, description="缓存命中率")
+    created_at: int = Field(..., description="创建时间戳")
+    last_request: int = Field(0, description="最近请求时间戳")

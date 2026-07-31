@@ -133,6 +133,17 @@ class MultiModalSettings(BaseSettings):
     timeout: int = 30
 
 
+class TenantStorageSettings(BaseSettings):
+    """租户存储配置（SQLite 优先）。"""
+
+    model_config = SettingsConfigDict(env_prefix="TENANT_", extra="ignore")
+
+    storage_type: str = "sqlite"
+    storage_path: str = "data/tenants.db"
+    default_tenant_id: str = "default"
+    default_tenant_api_key: str = ""
+
+
 class RerankerSettings(BaseSettings):
     """重排序服务配置。"""
 
@@ -169,6 +180,7 @@ class Settings(BaseSettings):
     metrics: MetricsSettings = Field(default_factory=MetricsSettings)
     multimodal: MultiModalSettings = Field(default_factory=MultiModalSettings)
     reranker: RerankerSettings = Field(default_factory=RerankerSettings)
+    tenant: TenantStorageSettings = Field(default_factory=TenantStorageSettings)
 
 
 settings = Settings()
@@ -188,4 +200,5 @@ __all__ = [
     "MetricsSettings",
     "MultiModalSettings",
     "RerankerSettings",
+    "TenantStorageSettings",
 ]
