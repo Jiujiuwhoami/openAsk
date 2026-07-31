@@ -571,11 +571,15 @@ async def list_documents(
 
 @admin_router.get("/tenants", response_model=list[TenantResponse])
 @limiter.limit("5/minute")
-async def list_tenants(request: Request):
-    """租户列表（管理端）。"""
+async def list_tenants(request: Request, include_deleted: bool = False):
+    """租户列表（管理端）。
+
+    Args:
+        include_deleted: 是否包含已删除的租户（默认 False）。
+    """
     _verify_admin_key(request)
     svc = _get_tenant_service()
-    tenants = svc.list_tenants()
+    tenants = svc.list_tenants(include_deleted=include_deleted)
     return [
         TenantResponse(
             tenant_id=t.tenant_id,
@@ -695,12 +699,36 @@ async def update_tenant(request: Request, tenant_id: str, body: UpdateTenantRequ
 @admin_router.delete("/tenants/{tenant_id}", response_model=DeleteResponse)
 @limiter.limit("5/minute")
 async def delete_tenant_endpoint(request: Request, tenant_id: str):
-    """删除租户（管理端，软删除）。"""
+    """删除租户（管理端，软删除）。
+
+    删除流程：
+      1. 软删除租户记录（标记 status=deleted）
+      2. 同步删除该租户在 Zvec 中的所有知识库文档
+      3. 返回被删除的文档数
+    """
     _verify_admin_key(request)
     svc = _get_tenant_service()
+
+    # 确认租户存在
+    tenant = svc.get_by_id(tenant_id)
+    if not tenant:
+        raise HTTPException(status_code=404, detail=f"租户不存在: {tenant_id}")
+
+    # 同步删除该租户的知识库文档
+    vector_store = getattr(request.app.state, "vector_store", None)
+    deleted_doc_count = 0
+    if vector_store and hasattr(vector_store, "adelete_by_tenant_id"):
+        try:
+            deleted_doc_count = await vector_store.adelete_by_tenant_id(tenant_id)
+        except Exception as e:
+            logger.warning(f"删除租户文档失败，但不阻断租户删除: {e}")
+
     success = svc.delete_tenant(tenant_id)
     if success:
-        return DeleteResponse(success=True, message="删除成功")
+        message = f"删除成功"
+        if deleted_doc_count > 0:
+            message += f"（同步删除 {deleted_doc_count} 篇文档）"
+        return DeleteResponse(success=True, message=message)
     raise HTTPException(status_code=404, detail=f"租户不存在: {tenant_id}")
 
 

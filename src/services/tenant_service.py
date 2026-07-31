@@ -237,13 +237,19 @@ class TenantService:
         finally:
             conn.close()
 
-    def list_tenants(self) -> List[Tenant]:
-        """列出所有租户。"""
+    def list_tenants(self, include_deleted: bool = False) -> List[Tenant]:
+        """列出所有租户。
+
+        Args:
+            include_deleted: 是否包含已删除（deleted）的租户。默认 False。
+        """
         conn = self._get_connection()
         try:
-            rows = conn.execute(
-                "SELECT * FROM tenants ORDER BY created_at DESC"
-            ).fetchall()
+            if include_deleted:
+                query = "SELECT * FROM tenants ORDER BY created_at DESC"
+            else:
+                query = "SELECT * FROM tenants WHERE status != 'deleted' ORDER BY created_at DESC"
+            rows = conn.execute(query).fetchall()
             return [_tenant_from_row(r) for r in rows]
         finally:
             conn.close()

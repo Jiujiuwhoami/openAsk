@@ -237,6 +237,27 @@ class ZvecStore(VectorStore):
         """删除指定文档（异步）。"""
         return await asyncio.to_thread(self.delete, doc_id, tenant_id)
 
+    def delete_by_tenant_id(self, tenant_id: str) -> int:
+        """按租户 ID 批量删除所有文档。返回删除的文档数。"""
+        try:
+            with self._lock:
+                self._ensure_collection()
+                tenant_filter = self._build_tenant_filter(tenant_id, None)
+                if tenant_filter:
+                    count = self._collection.delete_by_filter(filter=tenant_filter)
+                else:
+                    # 默认租户：全量删除
+                    count = self._collection.delete_by_filter(filter=None)
+            logger.info(f"批量删除租户文档完成: tenant={tenant_id} deleted={count}")
+            return count
+        except Exception as e:
+            logger.error(f"批量删除租户文档失败: tenant={tenant_id} | {e}", exc_info=True)
+            raise VectorStoreError(f"Failed to delete documents for tenant {tenant_id}: {e}")
+
+    async def adelete_by_tenant_id(self, tenant_id: str) -> int:
+        """按租户 ID 批量删除所有文档（异步）。"""
+        return await asyncio.to_thread(self.delete_by_tenant_id, tenant_id)
+
     def search(
         self,
         query_vector: np.ndarray,

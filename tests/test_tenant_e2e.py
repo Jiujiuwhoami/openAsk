@@ -477,6 +477,83 @@ class TestSoftDelete:
         assert svc.delete_tenant(tid) is True
 
 
+class TestTenantDeleteSemantics:
+    """测试 P1-6：list_tenants 排除 deleted、删除时返回文档数。"""
+
+    def test_list_tenants_excludes_deleted_by_default(self, e2e_app):
+        """默认 list_tenants 不返回已删除的租户。"""
+        client, svc = e2e_app
+
+        # 创建一个正常租户和一个被删除的租户
+        resp_a = client.post(
+            "/api/admin/tenants",
+            headers={"X-API-Key": ADMIN_KEY},
+            json={"name": "正常租户"},
+        )
+        tid_a = resp_a.json()["tenant_id"]
+
+        resp_b = client.post(
+            "/api/admin/tenants",
+            headers={"X-API-Key": ADMIN_KEY},
+            json={"name": "待删除租户"},
+        )
+        tid_b = resp_b.json()["tenant_id"]
+
+        # 删除租户 B
+        svc.delete_tenant(tid_b)
+
+        # 默认列表不应包含 B
+        resp = client.get(
+            "/api/admin/tenants",
+            headers={"X-API-Key": ADMIN_KEY},
+        )
+        assert resp.status_code == 200
+        ids = [t["tenant_id"] for t in resp.json()]
+        assert tid_b not in ids
+        assert tid_a in ids
+
+    def test_list_tenants_includes_deleted_when_requested(self, e2e_app):
+        """include_deleted=true 时返回所有租户（含 deleted）。"""
+        client, svc = e2e_app
+
+        resp_b = client.post(
+            "/api/admin/tenants",
+            headers={"X-API-Key": ADMIN_KEY},
+            json={"name": "待删除"},
+        )
+        tid_b = resp_b.json()["tenant_id"]
+        svc.delete_tenant(tid_b)
+
+        # 含 deleted 的列表应包含 B
+        resp = client.get(
+            "/api/admin/tenants?include_deleted=true",
+            headers={"X-API-Key": ADMIN_KEY},
+        )
+        assert resp.status_code == 200
+        ids = [t["tenant_id"] for t in resp.json()]
+        assert tid_b in ids
+
+    def test_delete_tenant_returns_document_count_message(self, e2e_app):
+        """删除租户返回 success 和 message。"""
+        client, svc = e2e_app
+
+        create_resp = client.post(
+            "/api/admin/tenants",
+            headers={"X-API-Key": ADMIN_KEY},
+            json={"name": "待删除"},
+        )
+        tid = create_resp.json()["tenant_id"]
+
+        resp = client.delete(
+            f"/api/admin/tenants/{tid}",
+            headers={"X-API-Key": ADMIN_KEY},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["success"] is True
+        assert "删除成功" in data["message"]
+
+
 # ================================================================
 # 测试：统计注册表
 # ================================================================
@@ -527,7 +604,6 @@ class TestTenantStatsRegistry:
         registry = TenantStatsRegistry()
         stats = registry.get_stats("nonexistent")
         assert stats is None
-        # 未创建则不报错，返回 None
 
 
 # ================================================================
