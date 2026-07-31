@@ -326,7 +326,7 @@ async def app_error_handler(request: Request, exc: AppError):
             error=exc.__class__.__name__,
             message=str(exc),
             timestamp=datetime.now(),
-        ).model_dump(),
+        ).model_dump(mode="json"),
     )
 
 
@@ -340,5 +340,5 @@ async def generic_error_handler(request: Request, exc: Exception):
             error="InternalServerError",
             message="服务器内部错误，请稍后重试",
             timestamp=datetime.now(),
-        ).model_dump(),
+        ).model_dump(mode="json"),
     )

@@ -40,10 +40,13 @@ class ZvecStore(VectorStore):
             if os.path.exists(self._data_path):
                 existing_files = os.listdir(self._data_path)
                 if existing_files:
+                    # zvec.open() 需要 LOCK 文件存在（destroy() 会删除它）
+                    self._ensure_lock_file()
                     self._collection = zvec.open(path=self._data_path)
                     logger.info(f"Zvec 集合已打开: {self._data_path} (维度: {self._dimension})")
                     return
                 os.rmdir(self._data_path)
+            # 首次创建时 Zvec 会自动创建 LOCK
             self._collection = zvec.create_and_open(
                 path=self._data_path,
                 schema=self._build_schema(),
@@ -52,6 +55,17 @@ class ZvecStore(VectorStore):
         except Exception as e:
             logger.error(f"Zvec 集合初始化失败: {e}", exc_info=True)
             raise VectorStoreError(f"Failed to initialize Zvec collection: {e}")
+
+    def _ensure_lock_file(self) -> None:
+        """确保 zvec LOCK 文件存在（zvec.open() 的前提条件）。"""
+        lock_path = os.path.join(self._data_path, "LOCK")
+        if not os.path.exists(lock_path):
+            parent = os.path.dirname(lock_path)
+            if not os.path.exists(parent):
+                os.makedirs(parent, exist_ok=True)
+            with open(lock_path, "w") as f:
+                f.write("")
+            logger.debug(f"已恢复 zvec LOCK 文件: {lock_path}")
 
     def _build_schema(self) -> zvec.CollectionSchema:
         return zvec.CollectionSchema(

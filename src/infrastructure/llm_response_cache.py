@@ -80,6 +80,7 @@ class LLMResponseCache(CacheBackend):
             if os.path.exists(self._cache_path):
                 existing_files = os.listdir(self._cache_path)
                 if existing_files:
+                    self._ensure_lock_file()
                     self._collection = zvec.open(path=self._cache_path)
                     logger.info(f"LLM 缓存集合已打开: {self._cache_path} (维度: {self._dimension})")
                     return
@@ -92,6 +93,17 @@ class LLMResponseCache(CacheBackend):
         except Exception as e:
             logger.error(f"LLM 缓存集合初始化失败: {e}", exc_info=True)
             raise VectorStoreError(f"Failed to initialize LLM cache collection: {e}")
+
+    def _ensure_lock_file(self) -> None:
+        """确保 zvec LOCK 文件存在（zvec.open() 的前提条件）。"""
+        lock_path = os.path.join(self._cache_path, "LOCK")
+        if not os.path.exists(lock_path):
+            parent = os.path.dirname(lock_path)
+            if not os.path.exists(parent):
+                os.makedirs(parent, exist_ok=True)
+            with open(lock_path, "w") as f:
+                f.write("")
+            logger.debug(f"已恢复 LLM 缓存 LOCK 文件: {lock_path}")
 
     def _build_schema(self) -> zvec.CollectionSchema:
         """构建缓存集合 Schema：单向量字段 + 响应内容 + 时间戳。"""
