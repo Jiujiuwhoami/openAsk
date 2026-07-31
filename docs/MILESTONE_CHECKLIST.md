@@ -16,7 +16,7 @@
 - [ ] 更新 `DEFAULT_TENANT_API_KEY`（默认租户 key 必须同步轮换）
 - [ ] 重启 openAsk 容器使配置生效
 - [ ] 验证：用新 key 调 `/api/admin/tenants` 返回 200
-- [ ] 验证：用旧 key `sk_admin_super_secret` 调 `/api/admin/tenants` 返回 401
+- [ ] 验证：用旧 key 调 `/api/admin/tenants` 返回 401
 - [ ] **删除本地所有包含旧 key 的文档/笔记/日志**
 
 ### □ 2. 提交后端 Dirty 文件

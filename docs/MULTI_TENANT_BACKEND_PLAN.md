@@ -157,9 +157,8 @@
 ## 已知问题 / 后续优化
 
 ### ⚠️ API Key 环境变量命名不一致
-- `.env` 中 `API_KEY=sk_admin_super_secret`
 - `ApiSettings` 的 `env_prefix="API_"` + 字段 `api_key` → 读取 `API_API_KEY`
-- **已修复**：`.env` 加了 `API_API_KEY=sk_admin_super_secret` 兼容
+- `.env` 中使用 `API_API_KEY`（已轮换，见 `.env`）
 
 ### ⚠️ LLM 配置隔离有限制
 - 当前 `RetrieverFactory` 支持租户自定义 LLM API Key / Base / Model

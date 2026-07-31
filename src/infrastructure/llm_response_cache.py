@@ -23,6 +23,11 @@ from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
+# 秒 → 毫秒，Zvec created_at 以毫秒存储以保持 TTL 精度
+def _now_ms() -> int:
+    """当前时间戳（毫秒），精度匹配 TTL 控制。"""
+    return int(time.time() * 1000)
+
 DEFAULT_CACHE_PATH = "data/zvec_llm_cache"
 DEFAULT_CLEANUP_INTERVAL = 3600
 
@@ -139,8 +144,8 @@ class LLMResponseCache(CacheBackend):
         try:
             with self._lock:
                 self._ensure_collection()
-                now = int(time.time())
-                min_created_at = now - self._ttl
+                now = _now_ms()
+                min_created_at = now - self._ttl * 1000
 
                 vector_query = zvec.Query(
                     field_name="query_vector",
@@ -170,7 +175,7 @@ class LLMResponseCache(CacheBackend):
         try:
             doc_id = str(uuid.uuid4())
             query_vec = self._normalize(key)
-            now = int(time.time())
+            now = _now_ms()
 
             with self._lock:
                 self._ensure_collection()
@@ -223,8 +228,8 @@ class LLMResponseCache(CacheBackend):
         try:
             with self._lock:
                 self._ensure_collection()
-                now = int(time.time())
-                min_created_at = now - self._ttl
+                now = _now_ms()
+                min_created_at = now - self._ttl * 1000
                 results = self._collection.query(
                     filter=f"created_at < {min_created_at}",
                     topk=self._maxsize,
