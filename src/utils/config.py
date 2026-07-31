@@ -14,10 +14,22 @@ from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+# ------------------------------------------------------------------
+# 子模型基础配置：env_file 必须在每个嵌套类上显式声明，
+# 否则 pydantic-settings 2.x 不会传播父类的 .env 文件路径。
+# 见 https://github.com/pydantic/pydantic-settings/issues/915
+# ------------------------------------------------------------------
+_SETTINGS_BASE_CONFIG = SettingsConfigDict(
+    env_file=".env",
+    env_file_encoding="utf-8",
+    extra="ignore",
+)
+
+
 class LLMSettings(BaseSettings):
     """LLM API 配置（兼容 OpenAI 接口格式）。"""
 
-    model_config = SettingsConfigDict(env_prefix="LLM_", extra="ignore")
+    model_config = SettingsConfigDict(**_SETTINGS_BASE_CONFIG, env_prefix="LLM_")
 
     api_key: str = ""
     api_base: str = "https://api.openai.com/v1"
@@ -29,7 +41,7 @@ class LLMSettings(BaseSettings):
 class ZvecSettings(BaseSettings):
     """Zvec 向量数据库配置。"""
 
-    model_config = SettingsConfigDict(env_prefix="ZVEC_", extra="ignore")
+    model_config = SettingsConfigDict(**_SETTINGS_BASE_CONFIG, env_prefix="ZVEC_")
 
     data_path: str = "data/zvec"
     dimension: int = 384
@@ -40,7 +52,7 @@ class ZvecSettings(BaseSettings):
 class EmbeddingSettings(BaseSettings):
     """嵌入服务配置。"""
 
-    model_config = SettingsConfigDict(env_prefix="EMBEDDING_", extra="ignore")
+    model_config = SettingsConfigDict(**_SETTINGS_BASE_CONFIG, env_prefix="EMBEDDING_")
 
     model_name: str = "all-MiniLM-L6-v2"
     batch_size: int = 32
@@ -51,7 +63,7 @@ class EmbeddingSettings(BaseSettings):
 class ApiSettings(BaseSettings):
     """API 服务配置。"""
 
-    model_config = SettingsConfigDict(env_prefix="API_", extra="ignore")
+    model_config = SettingsConfigDict(**_SETTINGS_BASE_CONFIG, env_prefix="API_")
 
     host: str = "127.0.0.1"
     port: int = 8000
@@ -70,7 +82,7 @@ class ApiSettings(BaseSettings):
 class RateLimitSettings(BaseSettings):
     """限流配置。"""
 
-    model_config = SettingsConfigDict(env_prefix="RATE_LIMIT_", extra="ignore")
+    model_config = SettingsConfigDict(**_SETTINGS_BASE_CONFIG, env_prefix="RATE_LIMIT_")
 
     enabled: bool = True
     per_user: str = "60/minute"
@@ -82,7 +94,7 @@ class RateLimitSettings(BaseSettings):
 class EmbeddingCacheSettings(BaseSettings):
     """查询 Embedding 缓存配置（相同查询 → 复用向量）。"""
 
-    model_config = SettingsConfigDict(env_prefix="EMBEDDING_CACHE_", extra="ignore")
+    model_config = SettingsConfigDict(**_SETTINGS_BASE_CONFIG, env_prefix="EMBEDDING_CACHE_")
 
     enabled: bool = True
     maxsize: int = 10000
@@ -92,7 +104,7 @@ class EmbeddingCacheSettings(BaseSettings):
 class LLMCacheSettings(BaseSettings):
     """LLM 缓存配置。"""
 
-    model_config = SettingsConfigDict(env_prefix="LLM_CACHE_", extra="ignore")
+    model_config = SettingsConfigDict(**_SETTINGS_BASE_CONFIG, env_prefix="LLM_CACHE_")
 
     enabled: bool = True
     maxsize: int = 1000
@@ -104,7 +116,7 @@ class LLMCacheSettings(BaseSettings):
 class LoggingSettings(BaseSettings):
     """日志配置。"""
 
-    model_config = SettingsConfigDict(env_prefix="LOG_", extra="ignore")
+    model_config = SettingsConfigDict(**_SETTINGS_BASE_CONFIG, env_prefix="LOG_")
 
     level: str = "INFO"
     file: str = "app.log"
@@ -114,7 +126,7 @@ class LoggingSettings(BaseSettings):
 class MetricsSettings(BaseSettings):
     """监控配置。"""
 
-    model_config = SettingsConfigDict(env_prefix="METRICS_", extra="ignore")
+    model_config = SettingsConfigDict(**_SETTINGS_BASE_CONFIG, env_prefix="METRICS_")
 
     enabled: bool = True
     port: int = 8000
@@ -123,7 +135,7 @@ class MetricsSettings(BaseSettings):
 class MultiModalSettings(BaseSettings):
     """多模态服务配置。"""
 
-    model_config = SettingsConfigDict(env_prefix="MULTIMODAL_", extra="ignore")
+    model_config = SettingsConfigDict(**_SETTINGS_BASE_CONFIG, env_prefix="MULTIMODAL_")
 
     enabled: bool = False
     provider: str = "generic"
@@ -136,7 +148,7 @@ class MultiModalSettings(BaseSettings):
 class TenantStorageSettings(BaseSettings):
     """租户存储配置（SQLite 优先）。"""
 
-    model_config = SettingsConfigDict(env_prefix="TENANT_", extra="ignore")
+    model_config = SettingsConfigDict(**_SETTINGS_BASE_CONFIG, env_prefix="TENANT_")
 
     storage_type: str = "sqlite"
     storage_path: str = "data/tenants.db"
@@ -147,7 +159,7 @@ class TenantStorageSettings(BaseSettings):
 class RerankerSettings(BaseSettings):
     """重排序服务配置。"""
 
-    model_config = SettingsConfigDict(env_prefix="RERANKER_", extra="ignore")
+    model_config = SettingsConfigDict(**_SETTINGS_BASE_CONFIG, env_prefix="RERANKER_")
 
     enabled: bool = True
     model_name: str = "BAAI/bge-reranker-v2-m3"

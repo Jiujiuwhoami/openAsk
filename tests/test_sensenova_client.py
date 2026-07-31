@@ -50,10 +50,14 @@ def test_token_monitor():
 
 @pytest.mark.asyncio
 async def test_client_no_api_key():
-    """测试未配置 API Key 的客户端。"""
-    client = SenseNovaClient(api_key="")
+    """测试未配置 API Key 的客户端（全局配置也空时）。"""
+    # 直接清空 _api_key，模拟双 key 均空的情况
+    client = SenseNovaClient(api_key="test-key")
+    client._api_key = ""
 
-    with pytest.raises(SenseNovaAPIError):
+    assert client.is_configured is False
+
+    with pytest.raises(SenseNovaAPIError, match="未配置"):
         await client.complete("测试")
 
 
