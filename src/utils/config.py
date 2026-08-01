@@ -68,15 +68,23 @@ class ApiSettings(BaseSettings):
     host: str = "127.0.0.1"
     port: int = 8000
     workers: int = 4
-    cors_origins: List[str] = Field(default_factory=lambda: ["http://localhost:3000", "http://localhost:8000"])
+    # 字段类型用 str | List[str]，避免 pydantic-settings 对 List 字段误做 JSON 解析
+    #（Docker 环境变量 API_CORS_ORIGINS=http://a,http://b 会被 json.loads 报 JSONDecodeError）
+    cors_origins: str | List[str] = "http://localhost:3000,http://localhost:8000"
     api_key: str = ""
 
-    @field_validator("cors_origins", mode="before")
-    @classmethod
-    def parse_cors_origins(cls, v):
-        if isinstance(v, str):
+    def _normalize_cors_origins(self, v: "str | List[str]") -> List[str]:
+        if isinstance(v, list):
+            return [str(s).strip() for s in v]
+        v = v.strip()
+        if not v:
+            return []
+        if "," in v:
             return [s.strip() for s in v.split(",") if s.strip()]
-        return v
+        return [v]
+
+    def model_post_init(self, __context) -> None:
+        object.__setattr__(self, "cors_origins", self._normalize_cors_origins(self.cors_origins))
 
 
 class RateLimitSettings(BaseSettings):
