@@ -86,25 +86,24 @@ def _verify_admin_key(request: Request) -> None:
 async def resolve_tenant(request: Request) -> Tenant:
     """FastAPI Depends：从 X-API-Key 解析租户，注入 request.state。
 
-    支持两种模式：
-    1. 多租户模式：X-API-Key 匹配某个租户的 key → 返回该 Tenant
-    2. 单租户兼容模式：未配置多租户时，退回旧的固定 key 校验
+    两种鉴权方式：
+    1. 租户 API Key：匹配某个活跃租户的 key → 返回该 Tenant
+    2. 管理 API Key（API_API_KEY）：匹配时返回 default 租户
 
     将 Tenant 写入 request.state.tenant，下游可透传。
     """
     provided_key = request.headers.get("X-API-Key")
 
-    # 优先：按 API Key 查找租户
+    # 优先：按租户 API Key 查找
     svc = _get_tenant_service()
     tenant = svc.get_by_api_key(provided_key)
     if tenant:
         request.state.tenant = tenant
         return tenant
 
-    # 降级：兼容旧版固定 key（API_KEY 环境变量）
+    # 降级：使用管理 API Key 时返回 default 租户
     admin_key = settings.api.api_key
     if admin_key and provided_key == admin_key:
-        # 兼容：无租户时返回 default
         default = svc.get_by_id("default") or svc.ensure_default_tenant()
         request.state.tenant = default
         return default
@@ -210,11 +209,6 @@ async def get_retriever_for_tenant(request: Request) -> "Retriever":
 async def get_knowledge_service(request: Request):
     """获取 KnowledgeService 实例（从 app.state）。"""
     return request.app.state.knowledge_service
-
-
-async def get_default_retriever(request: Request):
-    """获取 default 租户的 Retriever 实例（用于非租户路径）。"""
-    return request.app.state.retriever
 
 
 # ------------------------------------------------------------------

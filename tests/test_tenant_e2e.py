@@ -87,7 +87,6 @@ def e2e_app(tmp_path):
 
     app = FastAPI(title="OpenAsk E2E Test", version="1.0.0")
     app.state.tenant_service = svc
-    app.state.retriever = mock_retriever
     app.state.retriever_factory = mock_factory
     app.state.knowledge_service = mock_ks
     app.state.vector_store = mock_vs
@@ -146,8 +145,8 @@ class TestAdminRateLimit:
         try:
             app = FastAPI(title="OpenAsk RL Test", version="1.0.0")
             app.state.tenant_service = svc
-            app.state.retriever = type("MR", (), {"_llm_client": type("ML", (), {"is_configured": True})()})()
-            app.state.retriever_factory = type("MF", (), {"get_retriever_for_tenant": lambda *a, **kw: app.state.retriever})()
+            mock_retriever = type("MR", (), {"_llm_client": type("ML", (), {"is_configured": True})()})()
+            app.state.retriever_factory = type("MF", (), {"get_retriever_for_tenant": lambda *a, **kw: mock_retriever})()
             app.state.knowledge_service = AsyncMock()
             app.state.vector_store = type("VS", (), {"acount": lambda *a, **kw: 0, "count": lambda *a, **kw: 0})()
             app.state.embedding_service = type("ES", (), {"dimension": lambda *a, **kw: 384})()

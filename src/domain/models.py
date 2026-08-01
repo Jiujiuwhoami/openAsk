@@ -3,7 +3,7 @@
 import time
 from typing import List, Optional
 
-# 默认租户 ID：用于兼容单租户遗留数据
+# 默认租户 ID
 DEFAULT_TENANT_ID = "default"
 
 

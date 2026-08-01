@@ -287,7 +287,7 @@ def client():
     """创建测试客户端，使用 Mock 组件。
 
     多租户适配要点：
-      - app.state.retriever_factory 替代原 app.state.retriever
+      - 使用 app.state.retriever_factory 按租户获取 Retriever
       - 注入 MockTenantService 供 resolve_tenant() 使用
       - app.state.api_key 用于 _verify_admin_key()
       - 所有业务接口请求需携带 X-API-Key: {TEST_API_KEY}
@@ -310,7 +310,6 @@ def client():
     test_app = FastAPI(title="OpenAsk Test", version="1.0.0")
 
     # 注入 Mock 组件到 app.state
-    test_app.state.retriever = mock_retriever
     test_app.state.retriever_factory = mock_factory
     test_app.state.knowledge_service = MockKnowledgeService()
     test_app.state.vector_store = MockVectorStore()

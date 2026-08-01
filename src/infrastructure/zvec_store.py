@@ -2,6 +2,7 @@
 
 import asyncio
 import os
+import shutil
 import threading
 from typing import List, Optional
 
@@ -43,6 +44,11 @@ class ZvecStore(VectorStore):
                     # zvec.open() 需要 LOCK 文件存在（destroy() 会删除它）
                     self._ensure_lock_file()
                     self._collection = zvec.open(path=self._data_path)
+                    # 检查 schema 是否包含 tenant_id 字段
+                    if not self._schema_has_field("tenant_id"):
+                        logger.warning("Zvec 集合缺少 tenant_id 字段，正在迁移 schema...")
+                        self._migrate_schema()
+                        return
                     logger.info(f"Zvec 集合已打开: {self._data_path} (维度: {self._dimension})")
                     return
                 os.rmdir(self._data_path)
@@ -55,6 +61,107 @@ class ZvecStore(VectorStore):
         except Exception as e:
             logger.error(f"Zvec 集合初始化失败: {e}", exc_info=True)
             raise VectorStoreError(f"Failed to initialize Zvec collection: {e}")
+
+    def _schema_has_field(self, field_name: str) -> bool:
+        """检查集合 schema 是否包含指定字段。"""
+        try:
+            for f in self._collection.schema.fields:
+                if f.name == field_name:
+                    return True
+        except Exception:
+            pass
+        return False
+
+    def _migrate_schema(self) -> None:
+        """迁移旧 schema 集合：重建包含 tenant_id 字段的新集合。
+
+        由于 zvec add_column 仅支持数值类型，STRING 类型字段
+        需要重建集合。读取旧数据后以 tenant_id='default' 插入新集合。
+        """
+        old_path = self._data_path
+        backup_path = f"{old_path}.migration_backup_{int(__import__('time').time())}"
+
+        # 1. 读取旧数据
+        old_docs = []
+        old_vectors = []
+        try:
+            count = self._collection.stats.doc_count
+            if count > 0:
+                results = self._collection.query(topk=min(count, 10000))
+                for r in results:
+                    old_docs.append({
+                        "id": r.id,
+                        "fields": dict(r.fields),
+                    })
+                    vec = r.vectors.get("dense_embedding")
+                    if vec is not None:
+                        old_vectors.append(vec.tolist())
+                    else:
+                        old_vectors.append(None)
+                logger.info(f"已读取 {len(old_docs)} 篇旧文档用于 schema 迁移")
+        except Exception as e:
+            logger.warning(f"读取旧文档失败（不影响重建）: {e}")
+
+        # 2. 备份旧集合
+        self._collection.destroy()
+        self._collection = None
+        if os.path.exists(backup_path):
+            shutil.rmtree(backup_path)
+        shutil.copytree(old_path, backup_path)
+        logger.info(f"旧集合已备份到: {backup_path}")
+
+        # 3. 删除旧集合并重建
+        shutil.rmtree(old_path)
+        self._collection = zvec.create_and_open(
+            path=old_path,
+            schema=self._build_schema(),
+        )
+        logger.info("Zvec 集合已重建（含 tenant_id 字段）")
+
+        # 4. 重新插入旧数据（带 tenant_id='default'）
+        reinserted = 0
+        for doc, vec in zip(old_docs, old_vectors):
+            try:
+                fields = doc["fields"]
+                from src.domain.models import Document
+                document = Document(
+                    doc_id=fields.get("doc_id", doc["id"]),
+                    content=fields.get("content", ""),
+                    title=fields.get("title", ""),
+                    tags=fields.get("tags", []),
+                    source=fields.get("source", ""),
+                    tenant_id="default",
+                    created_at=fields.get("created_at", 0),
+                    updated_at=fields.get("updated_at", 0),
+                )
+                import numpy as np
+                if vec is not None:
+                    dense_vector = np.array(vec, dtype=np.float32)
+                else:
+                    # 向量缺失时生成零向量
+                    dense_vector = np.zeros(self._dimension, dtype=np.float32)
+                self._collection.insert(
+                    zvec.Doc(
+                        id=document.doc_id,
+                        vectors={"dense_embedding": dense_vector},
+                        fields={
+                            "content": document.content,
+                            "title": document.title,
+                            "tags": document.tags,
+                            "status": "active",
+                            "doc_id": document.doc_id,
+                            "created_at": document.created_at,
+                            "updated_at": document.updated_at,
+                            "source": document.source or "",
+                            "tenant_id": "default",
+                        },
+                    )
+                )
+                reinserted += 1
+            except Exception as e:
+                logger.warning(f"重新插入文档失败（跳过）: {doc['id']} | {e}")
+
+        logger.info(f"Schema 迁移完成: 重建集合, 重新插入 {reinserted}/{len(old_docs)} 篇文档")
 
     def _ensure_lock_file(self) -> None:
         """确保 zvec LOCK 文件存在（zvec.open() 的前提条件）。"""
@@ -159,6 +266,11 @@ class ZvecStore(VectorStore):
         Returns:
             组合后的 filter 表达式，或 None（无 filter）
         """
+        # 安全检测：schema 不含 tenant_id 时跳过过滤（不应触发，仅防御）
+        if self._collection is not None and not self._schema_has_field("tenant_id"):
+            logger.warning("集合 schema 缺少 tenant_id 字段，跳过租户过滤")
+            return extra_filter
+
         tid_filter = f"tenant_id = '{tenant_id}'"
         if extra_filter:
             return f"({tid_filter}) AND ({extra_filter})"

@@ -174,17 +174,13 @@ async def lifespan(app: FastAPI):
         logger.info("RetrieverFactory 初始化完成")
         app.state.stats_registry = retriever_factory._stats_registry
 
-        # 向后兼容：保留全局单例 retriever（用于 health check 等非租户路径）
-        retriever = retriever_factory.get_retriever_for_tenant("default")
-        logger.info("Retriever（default）初始化完成")
-
         knowledge_service = KnowledgeService(
             vector_store=vector_store,
             embedding_service=embedding_service,
         )
         logger.info("KnowledgeService 初始化完成")
 
-        # 确保默认租户存在（向后兼容单租户遗留数据）
+        # 确保默认租户存在
         from src.services.tenant_service import TenantService
 
         tenant_svc = TenantService()
@@ -196,7 +192,6 @@ async def lifespan(app: FastAPI):
         app.state.embedding_service = embedding_service
         app.state.vector_store = vector_store
         app.state.retriever_factory = retriever_factory
-        app.state.retriever = retriever  # 向后兼容
         app.state.reranker = reranker
         app.state.knowledge_service = knowledge_service
         app.state.tenant_service = tenant_svc
