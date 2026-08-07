@@ -258,13 +258,34 @@ async def close(self) -> None:
 
 ---
 
-## ✅ 当前已完成事项（无需重复）
+## ✅ 当前已完成事项
 
 - [x] 前端 TypeScript 构建修复（ProductImport.vue null safety）
-- [x] 后端测试覆盖率 49% → 72% 提升
-- [x] 新增 15 个测试文件、318 个测试
-- [x] 核心服务层测试覆盖（email/review/product_import/plan/analytics/sensenova/factory/reranker/multimodal/dynamic_limiter/zvec/retriever/document_loader）
+- [x] 后端测试覆盖率 49% → 78% 提升
+- [x] 新增 18 个测试文件、500+ 个测试
+- [x] 核心服务层测试覆盖（email/review/product_import/plan/analytics/sensenova/factory/reranker/multimodal/dynamic_limiter/zvec/retriever/document_loader/sensitive_filter）
 - [x] SaaS 业务代码（auth/projects/billing/analytics/conversations/ecommerce）全部实现
+
+### ✅ P0 完成
+
+- [x] **1.1 代码提交** — openAsk 和 admin-panel 已提交并打 v2.0.0 标签
+- [x] **1.2 API 层集成测试** — 新增 test_billing_api、test_main、test_conversations_api，API 层覆盖率从 0% 升至 39%-86%
+- [x] **1.3 数据迁移脚本** — 创建 scripts/migrate_v1_to_v2.py，支持 --dry-run、自动备份
+
+### ✅ P1 完成
+
+- [x] **2.1 修复 factory.py close bug** — close() 改为 async，main.py 中改为 await
+- [x] **2.2 Redis 配置对齐** — docker-compose 已配置 RATE_LIMIT_STORAGE_URI=redis://redis:6379/0，本地开发默认 memory://
+- [x] **2.5 补核心模块剩余测试** — sensitive_filter 100%，总覆盖率 78%
+
+### 📊 最终覆盖率
+
+| 指标 | 数值 |
+|------|------|
+| 总测试数 | 500+ |
+| 总覆盖率 | 78% |
+| 核心服务层 | 85-100% |
+| API 层 | 39-96% |
 
 ---
 
