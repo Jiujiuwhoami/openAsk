@@ -19,45 +19,85 @@ class PromptBuilder:
     """Prompt 构建器：根据上下文和查询构建合适的 Prompt。"""
 
     @classmethod
-    def build_qa_prompt(cls, query: str, context: List[str], system_prompt: Optional[str] = None) -> str:
+    def _build_language_instructions(cls, language: str) -> str:
+        """按语言返回回答指令。"""
+        if language == "en":
+            return (
+                "You are a professional knowledge base Q&A assistant. Your task is to answer "
+                "the user's questions based on the provided reference materials.\n\n"
+                "## Response Guidelines\n"
+                "1. **Answer based solely on the reference materials** — do not fabricate information not found in them\n"
+                "2. **Paraphrase in your own words** — avoid copying large passages verbatim\n"
+                "3. **Cite sources** — mark the document index at the end of sentences, e.g. [Source 1][Source 3]\n"
+                "4. **Ignore irrelevant content** — if a reference document is unrelated to the question, skip it\n"
+                "5. **Be honest when unable to answer** — if the references contain no useful information, "
+                "tell the user directly that no relevant information was found\n"
+                "6. **Response style** — natural, clear, conversational. Use paragraphs for structure "
+                "but avoid mechanical lists\n"
+                "7. **Appropriate length** — cover the topic concisely without unnecessary detail\n"
+                "8. **Answer in English** — always respond in English"
+            )
+        # 默认中文指令
+        return (
+            "你是一位专业的知识库问答助手。你的任务是基于提供的参考资料，用中文回答用户的问题。\n\n"
+            "## 回答规范\n"
+            "1. **仅基于参考资料回答**，不得编造参考资料中不存在的信息\n"
+            "2. **必须用自己的话重述**，禁止直接复制参考资料原文大段粘贴\n"
+            "3. **标注来源**：引用参考资料时在句末标注对应的文档编号，如 [来源1][来源3]\n"
+            "4. **忽略无关内容**：如果某篇参考资料与问题无关，忽略它，不要强行纳入回答\n"
+            "5. **无法回答时坦诚相告**：如果参考资料中完全没有可用的信息，直接告诉用户找不到相关信息，不要强行编造答案\n"
+            "6. **回答风格**：自然、清晰的口语化表达，像在跟用户对话一样。适当分段让结构清晰，但不要机械罗列\n"
+            "7. **篇幅适中**：根据问题的复杂度，回答长度控制在能说清楚即可，不要过度展开无关细节"
+        )
+
+    @classmethod
+    def _build_history_text(cls, messages: List[dict]) -> str:
+        """将对话历史渲染为文本块。"""
+        parts = []
+        for msg in messages:
+            role_label = "用户" if msg["role"] == "user" else "助手"
+            parts.append(f"{role_label}：{msg['content']}")
+        return "\n\n".join(parts)
+
+    @classmethod
+    def build_qa_prompt(
+        cls,
+        query: str,
+        context: List[str],
+        system_prompt: Optional[str] = None,
+        messages: Optional[List[dict]] = None,
+        language: str = "zh",
+    ) -> str:
         """构建问答 Prompt。
 
         Args:
             query: 用户查询
             context: 检索到的上下文内容列表
-            system_prompt: 租户自定义系统 Prompt，为 None 时不使用前缀
+            system_prompt: 自定义系统 Prompt，为 None 时使用默认指令
+            messages: 多轮对话历史（[{role, content}]）
+            language: 回答语言（zh/en）
         """
         context_text = "\n\n".join(
             [f"<doc index=\"{i + 1}\">\n{c.strip()}\n</doc>" for i, c in enumerate(context)]
         )
 
-        default_instructions = (
-            "你是一位专业的知识库问答助手。你的任务是基于提供的参考资料，用中文回答用户的问题。"
-        )
+        instructions = system_prompt or cls._build_language_instructions(language)
 
-        return f"""{system_prompt or default_instructions}
+        prompt_parts = [instructions]
 
-<instructions>
-## 角色与任务
-你是一名严谨的 AI 知识库助手。你需要仔细阅读参考资料，从中提取与问题相关的信息，然后用自己的话组织成通顺的解答。
+        # 参考资料
+        prompt_parts.append(f"<instructions>\n## 参考资料\n{context_text}")
 
-## 参考资料
-{context_text}
+        # 对话历史（如果有）
+        if messages:
+            history_text = cls._build_history_text(messages)
+            prompt_parts.append(f"## 对话历史\n{history_text}")
 
-## 用户问题
-{query}
+        # 用户问题
+        prompt_parts.append(f"## 用户问题\n{query}")
 
-## 回答规范
-1. **仅基于参考资料回答**，不得编造参考资料中不存在的信息
-2. **必须用自己的话重述**，禁止直接复制参考资料原文大段粘贴
-3. **标注来源**：引用参考资料时在句末标注对应的文档编号，如 [来源1][来源3]
-4. **忽略无关内容**：如果某篇参考资料与问题无关，忽略它，不要强行纳入回答
-5. **无法回答时坦诚相告**：如果参考资料中完全没有可用的信息，直接告诉用户找不到相关信息，不要强行编造答案
-6. **回答风格**：自然、清晰的口语化表达，像在跟用户对话一样。适当分段让结构清晰，但不要机械罗列
-7. **篇幅适中**：根据问题的复杂度，回答长度控制在能说清楚即可，不要过度展开无关细节
-</instructions>
-
-## 回答"""
+        prompt_parts.append("</instructions>\n\n## 回答")
+        return "\n\n".join(prompt_parts)
 
     @classmethod
     def build_summary_prompt(cls, text: str) -> str:
@@ -138,11 +178,7 @@ class SenseNovaClient(LLMClient):
             logger.warning("SenseNova API Key 未配置，API 调用可能失败")
 
     def _get_client(self) -> httpx.AsyncClient:
-        """获取或创建异步客户端（线程安全）。
-
-        使用双重检查锁定模式：先在锁外快速检查，获取锁后再次检查，
-        避免每次调用都获取锁，同时保证线程安全。
-        """
+        """获取或创建异步客户端（线程安全）。"""
         if self._async_client is None:
             with self._lock:
                 if self._async_client is None:
@@ -155,16 +191,31 @@ class SenseNovaClient(LLMClient):
         max_tokens: int = 2048,
         temperature: float = 0.7,
         stop: Optional[List[str]] = None,
+        messages: Optional[List[dict]] = None,
     ) -> Dict:
-        """构建请求 payload。"""
-        payload = {
-            "model": self._model,
-            "messages": [
-                {"role": "user", "content": prompt},
-            ],
-            "max_tokens": max_tokens,
-            "temperature": temperature,
-        }
+        """构建请求 payload。
+
+        当提供 messages 时，使用多消息格式（兼容 OpenAI 多轮对话协议）。
+        否则使用单条 user 消息（兼容旧版单轮调用）。
+        """
+        if messages:
+            # 多轮对话格式：messages 已包含完整历史 + 当前问题
+            payload = {
+                "model": self._model,
+                "messages": messages,
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+            }
+        else:
+            # 单轮格式：prompt 作为单条 user 消息
+            payload = {
+                "model": self._model,
+                "messages": [
+                    {"role": "user", "content": prompt},
+                ],
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+            }
         if stop:
             payload["stop"] = stop
         return payload
@@ -203,28 +254,25 @@ class SenseNovaClient(LLMClient):
         max_tokens: int = 2048,
         temperature: float = 0.7,
         stop: Optional[List[str]] = None,
+        messages: Optional[List[dict]] = None,
     ) -> str:
         """调用 SenseNova API 生成文本（异步）。
 
-        使用 httpx.AsyncClient 进行异步请求，不阻塞事件循环。
-
         Args:
-            prompt: 输入 Prompt
-            max_tokens: 最大输出 Token 数（默认 2048）
-            temperature: 温度参数（0-1，越高越随机）
+            prompt: 输入 Prompt（单轮时为完整 prompt，多轮时仅用于 fallback）
+            max_tokens: 最大输出 Token 数
+            temperature: 温度参数
             stop: 停止序列
+            messages: 多轮消息列表（有则使用此格式替代单条 prompt）
 
         Returns:
             生成的文本内容
-
-        Raises:
-            SenseNovaAPIError: API 调用失败
         """
         if not self._api_key:
             raise SenseNovaAPIError("SenseNova API Key 未配置")
 
         url = f"{self._api_base}/chat/completions"
-        payload = self._build_payload(prompt, max_tokens, temperature, stop)
+        payload = self._build_payload(prompt, max_tokens, temperature, stop, messages=messages)
         headers = self._build_headers()
 
         try:
@@ -239,38 +287,100 @@ class SenseNovaClient(LLMClient):
             raise SenseNovaAPIError(f"API 返回格式错误: {e}")
 
     async def generate_answer(
-        self, query: str, context: List[str], system_prompt: Optional[str] = None
+        self,
+        query: str,
+        context: List[str],
+        system_prompt: Optional[str] = None,
+        messages: Optional[List[dict]] = None,
+        language: str = "zh",
     ) -> str:
-        """根据上下文生成回答（异步）。"""
-        prompt = PromptBuilder.build_qa_prompt(query, context, system_prompt=system_prompt)
-        return await self.complete(prompt)
+        """根据上下文生成回答（异步）。
+
+        当提供了 messages（多轮历史）时，将当前上下文和问题拼接为 system 消息，
+        与历史消息一起组成完整的多轮消息列表发送给 API。
+        """
+        if messages:
+            # 多轮对话：构建系统消息（含参考资料 + 指令），历史作为 messages 列表
+            context_text = "\n\n".join(
+                [f"<doc index=\"{i + 1}\">\n{c.strip()}\n</doc>" for i, c in enumerate(context)]
+            )
+            instructions = system_prompt or PromptBuilder._build_language_instructions(language)
+            system_content = f"{instructions}\n\n## 参考资料\n{context_text}"
+
+            full_messages = [
+                {"role": "system", "content": system_content},
+                *messages,
+                {"role": "user", "content": query},
+            ]
+            return await self.complete("", messages=full_messages)
+        else:
+            # 单轮对话：使用传统 prompt 拼接
+            prompt = PromptBuilder.build_qa_prompt(
+                query, context, system_prompt=system_prompt, language=language
+            )
+            return await self.complete(prompt)
 
     async def stream_answer(
         self,
         query: str,
         context: List[str],
         system_prompt: Optional[str] = None,
-    ) -> AsyncGenerator[str, None]:
+        messages: Optional[List[dict]] = None,
+        language: str = "zh",
+    ) -> AsyncGenerator[dict, None]:
         """流式生成回答（异步生成器）。
 
         使用 SSE（Server-Sent Events）协议逐 token 返回文本增量。
-        兼容 OpenAI 格式的流式响应。支持自定义 system_prompt。
+        兼容 OpenAI 格式的流式响应。支持多轮对话历史。
 
         Args:
             query: 用户查询
             context: 上下文片段列表
-            system_prompt: 租户自定义系统 Prompt
+            system_prompt: 自定义系统 Prompt
+            messages: 多轮对话历史（[{role, content}]）
+            language: 回答语言（zh/en）
 
         Yields:
-            回答文本增量（通常是 token 级别）
+            包含 type 和 content 的字典
         """
         if not self._api_key:
             raise SenseNovaAPIError("SenseNova API Key 未配置")
 
-        prompt = PromptBuilder.build_qa_prompt(query, context, system_prompt=system_prompt)
         url = f"{self._api_base}/chat/completions"
-        payload = self._build_payload(prompt, max_tokens=2048)
-        payload["stream"] = True
+
+        if messages:
+            # 多轮对话格式
+            context_text = "\n\n".join(
+                [f"<doc index=\"{i + 1}\">\n{c.strip()}\n</doc>" for i, c in enumerate(context)]
+            )
+            instructions = system_prompt or PromptBuilder._build_language_instructions(language)
+            system_content = f"{instructions}\n\n## 参考资料\n{context_text}"
+
+            full_messages = [
+                {"role": "system", "content": system_content},
+                *messages,
+                {"role": "user", "content": query},
+            ]
+            payload = {
+                "model": self._model,
+                "messages": full_messages,
+                "max_tokens": 2048,
+                "temperature": 0.7,
+                "stream": True,
+            }
+        else:
+            # 单轮格式
+            prompt = PromptBuilder.build_qa_prompt(
+                query, context, system_prompt=system_prompt, language=language
+            )
+            payload = {
+                "model": self._model,
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": 2048,
+                "temperature": 0.7,
+                "stream": True,
+            }
+
         headers = self._build_headers()
 
         prompt_tokens = 0
@@ -320,7 +430,7 @@ class SenseNovaClient(LLMClient):
 
             with self._lock:
                 if prompt_tokens == 0:
-                    prompt_tokens = len(prompt) // 4
+                    prompt_tokens = len(payload.get("messages", [{"content": ""}])[0].get("content", "")) // 4
                 self._token_monitor.record(prompt_tokens, completion_tokens)
 
             logger.debug(f"SenseNova 流式调用完成，返回约 {completion_tokens} tokens")

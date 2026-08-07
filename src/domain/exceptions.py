@@ -36,16 +36,31 @@ class MultiModalError(AppError):
     pass
 
 
-class TenantError(AppError):
-    """租户相关异常。"""
+class UserNotFoundError(AppError):
+    """用户不存在。"""
     pass
 
 
-class TenantNotFoundError(TenantError):
-    """租户不存在。"""
+class UserAlreadyExistsError(AppError):
+    """用户已存在（邮箱重复）。"""
     pass
 
 
-class TenantSuspendedError(TenantError):
-    """租户已暂停，禁止使用。"""
+class InvalidCredentialsError(AppError):
+    """邮箱或密码错误。"""
+    pass
+
+
+class UserSuspendedError(AppError):
+    """用户已被禁用。"""
+    pass
+
+
+class ProjectNotFoundError(AppError):
+    """项目不存在。"""
+    pass
+
+
+class ProjectSuspendedError(AppError):
+    """项目已被禁用。"""
     pass

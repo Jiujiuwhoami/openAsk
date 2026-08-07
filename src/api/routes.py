@@ -1,10 +1,9 @@
 """API 路由定义。
 
-多租户改造：
-  - verify_api_key → resolve_tenant：从 X-API-Key 解析 Tenant 注入 request.state.tenant
-  - 所有业务路由加 Depends(resolve_tenant)
-  - /api/health 保留免鉴权
-  - 新增 /api/admin/tenants 管理路由组（需要 admin 权限，暂用 admin_router 标记）
+业务路由（chat, knowledge, search）使用 X-API-Key 鉴权，
+通过 ProjectService 解析为 Project 实例。
+
+多轮对话：前端传 conversation_id，后端从 ConversationService 恢复历史并注入 LLM。
 """
 
 import json
@@ -12,15 +11,21 @@ import os
 import time
 import tempfile
 from datetime import datetime
+from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Request
 
 from fastapi.responses import StreamingResponse
 
 from src.utils.limiter import limiter
+from src.services.analytics_service import AnalyticsService
+from src.services.plan_service import PlanService
+from src.services.sensitive_filter import SensitiveFilterService
+from src.services.conversation_service import ConversationService
 from src.api.schemas import (
     ChatRequest,
     ChatResponse,
+    ChatMessage,
     Source,
     DocumentRequest,
     UpdateDocumentRequest,
@@ -32,95 +37,41 @@ from src.api.schemas import (
     PaginatedResponse,
     HealthResponse,
     DeleteResponse,
-    # 租户管理
-    CreateTenantRequest,
-    UpdateTenantRequest,
-    TenantResponse,
-    TenantKeyResponse,
-    TenantStatsResponse,
+    BatchDeleteRequest,
 )
 from src.core.retriever import RetrievalResult
-from src.domain.models import Tenant
-from src.domain.exceptions import KnowledgeBaseError, DocumentNotFoundError, TenantNotFoundError
-from src.services.tenant_service import TenantService
+from src.domain.project import Project
+from src.domain.exceptions import KnowledgeBaseError, DocumentNotFoundError
+from src.services.project_service import ProjectService
 from src.utils.config import settings
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
 router = APIRouter(prefix="/api")
-admin_router = APIRouter(prefix="/api/admin")
 
-# ------------------------------------------------------------------
-# 租户鉴权
-# ------------------------------------------------------------------
-
-_tenant_service: TenantService = None  # 在 lifespan 中初始化
+# 全局服务实例
+_project_service = ProjectService()
+_conv_service = ConversationService()
 
 
-def _get_tenant_service() -> TenantService:
-    """获取全局 TenantService 实例（单例延迟初始化）。"""
-    global _tenant_service
-    if _tenant_service is None:
-        _tenant_service = TenantService()
-    return _tenant_service
+async def resolve_project(request: Request) -> Project:
+    """从 X-API-Key 解析当前 Project。
 
-
-def _verify_admin_key(request: Request) -> None:
-    """管理端点鉴权：使用 API 全局 admin key。
-
-    当前设计：管理端点使用 .env 中配置的 API_KEY（admin 级别）。
-    未来可扩展为角色系统。
+    用于 chat, knowledge, search 等业务路由的鉴权。
     """
-    admin_key = settings.api.api_key
-    if not admin_key:
-        raise HTTPException(
-            status_code=503,
-            detail="管理员未配置 API_KEY，请在 .env 中配置 API_KEY",
-        )
-    provided = request.headers.get("X-API-Key")
-    if provided != admin_key:
-        raise HTTPException(status_code=401, detail="Unauthorized: Invalid API Key")
+    api_key = request.headers.get("X-API-Key")
+    if not api_key:
+        raise HTTPException(status_code=401, detail="缺少 X-API-Key")
 
+    project = _project_service.get_by_api_key(api_key)
+    if project is None:
+        raise HTTPException(status_code=401, detail="无效的 API Key")
+    if not project.is_active:
+        raise HTTPException(status_code=403, detail="项目已被禁用")
 
-async def resolve_tenant(request: Request) -> Tenant:
-    """FastAPI Depends：从 X-API-Key 解析租户，注入 request.state。
-
-    两种鉴权方式：
-    1. 租户 API Key：匹配某个活跃租户的 key → 返回该 Tenant
-    2. 管理 API Key（API_API_KEY）：匹配时返回 default 租户
-
-    将 Tenant 写入 request.state.tenant，下游可透传。
-    """
-    provided_key = request.headers.get("X-API-Key")
-
-    # 优先：按租户 API Key 查找
-    svc = _get_tenant_service()
-    tenant = svc.get_by_api_key(provided_key)
-    if tenant:
-        request.state.tenant = tenant
-        return tenant
-
-    # 降级：使用管理 API Key 时返回 default 租户
-    admin_key = settings.api.api_key
-    if admin_key and provided_key == admin_key:
-        default = svc.get_by_id("default") or svc.ensure_default_tenant()
-        request.state.tenant = default
-        return default
-
-    raise HTTPException(status_code=401, detail="Unauthorized: Invalid API Key")
-
-
-async def resolve_optional_tenant(request: Request) -> Tenant:
-    """可选的租户解析：无 key 时不报错，返回 default。
-
-    用于健康检查等公开端点（但仍需要租户上下文）。
-    """
-    tenant = _get_tenant_service().get_by_id("default")
-    if tenant:
-        return tenant
-    svc = _get_tenant_service()
-    return svc.ensure_default_tenant()
+    request.state.project = project
+    return project
 
 
 # ------------------------------------------------------------------
@@ -159,7 +110,7 @@ async def health_check(request: Request):
 
     try:
         factory = request.app.state.retriever_factory
-        retriever = factory.get_retriever_for_tenant("default")
+        retriever = factory.get_retriever_for_project("default")
         if not retriever._llm_client.is_configured:
             llm_status = "warning: API key not configured"
     except Exception as e:
@@ -167,7 +118,7 @@ async def health_check(request: Request):
 
     try:
         factory = request.app.state.retriever_factory
-        factory.get_retriever_for_tenant("default")
+        factory.get_retriever_for_project("default")
     except Exception as e:
         cache_status = f"unhealthy: {str(e)[:50]}"
         overall_status = "degraded"
@@ -188,22 +139,15 @@ async def health_check(request: Request):
 # 服务工厂
 # ------------------------------------------------------------------
 
-async def get_retriever_for_tenant(request: Request) -> "Retriever":
-    """按租户获取隔离的 Retriever 实例（通过 RetrieverFactory）。
-
-    租户上下文由 resolve_tenant 注入到 request.state.tenant，
-    本函数从中读取 tenant_id 和 tenant 对象。
-
-    每个租户获得独立的 Retriever（含独立 LLM 响应缓存），
-    共享 EmbeddingService / ZvecStore / Reranker。
-    """
+async def get_retriever_for_project(request: Request) -> "Retriever":
+    """按项目获取隔离的 Retriever 实例（通过 RetrieverFactory）。"""
     factory = getattr(request.app.state, "retriever_factory", None)
     if factory is None:
         raise RuntimeError("RetrieverFactory 未初始化")
-    tenant = getattr(request.state, "tenant", None)
-    if tenant is None:
-        raise RuntimeError("租户上下文未注入，请先调用 resolve_tenant")
-    return factory.get_retriever_for_tenant(tenant.tenant_id, tenant)
+    project = getattr(request.state, "project", None)
+    if project is None:
+        raise RuntimeError("项目上下文未注入")
+    return factory.get_retriever_for_project(project.project_id, project)
 
 
 async def get_knowledge_service(request: Request):
@@ -215,20 +159,89 @@ async def get_knowledge_service(request: Request):
 # 问答接口
 # ------------------------------------------------------------------
 
+def _build_conversation_title(query: str) -> str:
+    """从首条查询截取会话标题。"""
+    return query[:100] if len(query) > 100 else query
+
+
+def _get_messages_for_llm(
+    query: str,
+    conversation_id: Optional[str] = None,
+    request_messages: Optional[list] = None,
+) -> tuple:
+    """获取注入 LLM 的历史消息列表。
+
+    优先级：request_messages > conversation_id 历史 > 无历史
+
+    Returns:
+        (llm_messages: List[dict] | None, conv_id: str)
+    """
+    if request_messages:
+        # 使用前端传来的消息（前端直接管理历史）
+        return [{"role": m.role, "content": m.content} for m in request_messages], conversation_id or ""
+
+    if conversation_id:
+        # 从服务端恢复历史
+        history = _conv_service.get_history_as_messages(conversation_id, limit=10)
+        conv = _conv_service.get_conversation(conversation_id)
+        if conv:
+            return history, conversation_id
+
+    return None, ""
+
+
 @router.post("/chat", response_model=ChatResponse)
 async def chat(
     request: Request,
     body: ChatRequest,
-    tenant=Depends(resolve_tenant),
-    retriever=Depends(get_retriever_for_tenant),
+    project=Depends(resolve_project),
+    retriever=Depends(get_retriever_for_project),
 ):
-    """聊天接口：基于知识库回答用户问题。"""
+    """聊天接口：基于知识库回答用户问题。
+
+    支持多轮对话：
+    - 新对话：不传 conversation_id，后端自动创建
+    - 续传：传 conversation_id，后端恢复历史
+    - 也可传 messages 数组自行管理历史
+    """
+    # 敏感词检查
+    _sensitive = SensitiveFilterService()
+    if _sensitive.contains_sensitive(body.query, project.project_id):
+        raise HTTPException(status_code=400, detail="提问包含敏感词，请重新输入")
+
+    # 确定语言（请求级覆盖 > 项目设置）
+    language = body.language or project.language
+
+    # 会话管理
+    conversation_id = body.conversation_id or ""
+    conv = None
+    if not conversation_id:
+        # 新对话：创建会话
+        title = _build_conversation_title(body.query)
+        conv = _conv_service.create_conversation(project.project_id, title=title)
+        conversation_id = conv.conversation_id
+    else:
+        conv = _conv_service.get_conversation(conversation_id)
+        if not conv or conv.project_id != project.project_id:
+            raise HTTPException(status_code=404, detail="会话不存在")
+
+    # 获取历史消息（用于 LLM 上下文）
+    # 注意：先获取历史再追加用户消息，避免 LLM 收到重复的当前查询
+    llm_messages, _ = _get_messages_for_llm(
+        body.query, conversation_id, body.messages
+    )
+
+    # 追加用户消息
+    _conv_service.add_message(conversation_id, "user", body.query)
+
     try:
         result: RetrievalResult = await retriever.retrieve(
             query=body.query,
             top_k=body.top_k,
-            system_prompt=tenant.system_prompt or None,
-            tenant_id=tenant.tenant_id,
+            system_prompt=project.system_prompt or None,
+            project_id=project.project_id,
+            messages=llm_messages,
+            language=language,
         )
 
         sources = [
@@ -241,11 +254,34 @@ async def chat(
             for s in result.sources
         ]
 
+        # 追加助手消息
+        _conv_service.add_message(conversation_id, "assistant", result.answer)
+
+        # 自动更新标题（首条消息后）
+        if conv and conv.message_count == 0:
+            _conv_service.update_title(conversation_id, _build_conversation_title(body.query))
+
+        # 记录日志
+        try:
+            AnalyticsService().record_chat(
+                project_id=project.project_id,
+                query=body.query,
+                answer=result.answer,
+                sources=[s.model_dump() for s in sources],
+                cache_hit=result.cache_hit,
+                llm_used=result.llm_used,
+                conversation_id=conversation_id,
+            )
+        except Exception as log_err:
+            logger.warning(f"记录问答日志失败: {log_err}")
+
         return ChatResponse(
             answer=result.answer,
             sources=sources,
             cache_hit=result.cache_hit,
             llm_used=result.llm_used,
+            conversation_id=conversation_id,
+            handoff_suggested=result.handoff_suggested,
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -255,23 +291,117 @@ async def chat(
 async def chat_stream(
     request: Request,
     body: ChatRequest,
-    tenant=Depends(resolve_tenant),
-    retriever=Depends(get_retriever_for_tenant),
+    project=Depends(resolve_project),
+    retriever=Depends(get_retriever_for_project),
 ):
-    """流式聊天接口：逐事件返回回答（SSE 格式）。"""
+    """流式聊天接口：逐事件返回回答（SSE 格式）。
+
+    支持多轮对话（同 /api/chat）。
+    流式完成后自动记录日志到 chat_logs。
+    """
+
+    # 敏感词检查
+    _sensitive = SensitiveFilterService()
+    if _sensitive.contains_sensitive(body.query, project.project_id):
+        async def error_gen():
+            yield f"data: {json.dumps({'event': 'error', 'data': '提问包含敏感词，请重新输入'}, ensure_ascii=False)}\n\n"
+            yield f"data: {json.dumps({'event': 'done', 'data': None}, ensure_ascii=False)}\n\n"
+        return StreamingResponse(
+            error_gen(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
+        )
+
+    # 确定语言
+    language = body.language or project.language
+
+    # 会话管理
+    conversation_id = body.conversation_id or ""
+    conv = None
+    if not conversation_id:
+        title = _build_conversation_title(body.query)
+        conv = _conv_service.create_conversation(project.project_id, title=title)
+        conversation_id = conv.conversation_id
+    else:
+        conv = _conv_service.get_conversation(conversation_id)
+        if not conv or conv.project_id != project.project_id:
+            async def not_found_gen():
+                yield f"data: {json.dumps({'event': 'error', 'data': '会话不存在'}, ensure_ascii=False)}\n\n"
+                yield f"data: {json.dumps({'event': 'done', 'data': None}, ensure_ascii=False)}\n\n"
+            return StreamingResponse(
+                not_found_gen(),
+                media_type="text/event-stream",
+                headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
+            )
+
+    # 获取历史消息（先获取再追加，避免 LLM 收到重复的当前查询）
+    llm_messages, _ = _get_messages_for_llm(
+        body.query, conversation_id, body.messages
+    )
+
+    # 追加用户消息
+    _conv_service.add_message(conversation_id, "user", body.query)
 
     async def event_generator():
+        answer_chunks: list[str] = []
+        sources_data: list = []
+        cache_hit = False
+        llm_used = False
+        handoff_suggested = False
+
+        # 先发送会话 ID（前端保存用于续传）
+        yield f"data: {json.dumps({'event': 'conversation_id', 'data': conversation_id}, ensure_ascii=False)}\n\n"
+
         try:
             async for event in retriever.retrieve_stream(
                 query=body.query,
                 top_k=body.top_k,
-                system_prompt=tenant.system_prompt or None,
-                tenant_id=tenant.tenant_id,
+                system_prompt=project.system_prompt or None,
+                project_id=project.project_id,
+                messages=llm_messages,
+                language=language,
             ):
+                # 收集数据用于日志
+                if event["event"] == "sources":
+                    sources_data = event["data"] or []
+                elif event["event"] == "cache_hit":
+                    cache_hit = bool(event["data"])
+                elif event["event"] == "handoff_suggested":
+                    handoff_suggested = bool(event["data"])
+                elif event["event"] == "answer_delta":
+                    answer_chunks.append(event["data"] or "")
+                elif event["event"] == "done":
+                    llm_used = True
+
                 yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+
         except Exception as e:
             yield f"data: {json.dumps({'event': 'error', 'data': str(e)}, ensure_ascii=False)}\n\n"
             yield f"data: {json.dumps({'event': 'done', 'data': None}, ensure_ascii=False)}\n\n"
+
+        # 流式完成后记录日志和会话
+        full_answer = "".join(answer_chunks)
+        if full_answer:
+            try:
+                # 追加助手消息
+                _conv_service.add_message(conversation_id, "assistant", full_answer)
+
+                # 自动更新标题
+                if conv and conv.message_count == 0:
+                    _conv_service.update_title(conversation_id, _build_conversation_title(body.query))
+
+                # 记录日志
+                AnalyticsService().record_chat(
+                    project_id=project.project_id,
+                    query=body.query,
+                    answer=full_answer,
+                    sources=sources_data,
+                    cache_hit=cache_hit,
+                    llm_used=llm_used,
+                    conversation_id=conversation_id,
+                )
+            except Exception as log_err:
+                logger.warning(f"记录流式问答日志失败: {log_err}")
 
     return StreamingResponse(
         event_generator(),
@@ -294,16 +424,22 @@ async def create_document(
     request: Request,
     body: DocumentRequest,
     knowledge_service=Depends(get_knowledge_service),
-    tenant=Depends(resolve_tenant),
+    project=Depends(resolve_project),
 ):
     """创建文档接口。"""
+    _plan_svc = PlanService()
+    _current_count = await knowledge_service.count_documents(project_id=project.project_id)
+    _check = _plan_svc.check_limits(project.project_id, document_count=_current_count + 1)
+    if not _check["allowed"]:
+        raise HTTPException(status_code=402, detail=_check["reason"])
+
     try:
         doc = await knowledge_service.create_document_from_text(
             title=body.title,
             content=body.content,
             tags=body.tags,
             source=body.source,
-            tenant_id=tenant.tenant_id,
+            project_id=project.project_id,
         )
         return DocumentResponse(
             doc_id=doc.doc_id,
@@ -329,9 +465,15 @@ async def upload_document(
     request: Request,
     file: UploadFile = File(...),
     knowledge_service=Depends(get_knowledge_service),
-    tenant=Depends(resolve_tenant),
+    project=Depends(resolve_project),
 ):
     """上传文档接口。"""
+    _plan_svc = PlanService()
+    _current_count = await knowledge_service.count_documents(project_id=project.project_id)
+    _check = _plan_svc.check_limits(project.project_id, document_count=_current_count + 1)
+    if not _check["allowed"]:
+        raise HTTPException(status_code=402, detail=_check["reason"])
+
     filename = file.filename or ""
     ext = os.path.splitext(filename)[1].lower()
 
@@ -352,7 +494,7 @@ async def upload_document(
 
         doc = await knowledge_service.load_and_store_document(
             file_path=temp_path,
-            tenant_id=tenant.tenant_id,
+            project_id=project.project_id,
         )
 
         return DocumentResponse(
@@ -380,11 +522,11 @@ async def upload_document(
 async def get_document(
     doc_id: str,
     knowledge_service=Depends(get_knowledge_service),
-    tenant=Depends(resolve_tenant),
+    project=Depends(resolve_project),
 ):
     """获取文档接口。"""
     try:
-        doc = await knowledge_service.get_by_id(doc_id, tenant_id=tenant.tenant_id)
+        doc = await knowledge_service.get_by_id(doc_id, project_id=project.project_id)
         if not doc:
             raise DocumentNotFoundError(f"文档不存在: {doc_id}")
         return DocumentResponse(
@@ -409,7 +551,7 @@ async def update_document(
     doc_id: str,
     body: UpdateDocumentRequest,
     knowledge_service=Depends(get_knowledge_service),
-    tenant=Depends(resolve_tenant),
+    project=Depends(resolve_project),
 ):
     """更新文档接口。"""
     try:
@@ -419,7 +561,7 @@ async def update_document(
             content=body.content,
             tags=body.tags,
             source=body.source,
-            tenant_id=tenant.tenant_id,
+            project_id=project.project_id,
         )
         return DocumentResponse(
             doc_id=doc.doc_id,
@@ -442,15 +584,39 @@ async def update_document(
 async def delete_document(
     doc_id: str,
     knowledge_service=Depends(get_knowledge_service),
-    tenant=Depends(resolve_tenant),
+    project=Depends(resolve_project),
 ):
     """删除文档接口。"""
     try:
-        success = await knowledge_service.delete_document(doc_id, tenant_id=tenant.tenant_id)
+        success = await knowledge_service.delete_document(doc_id, project_id=project.project_id)
         if success:
             return DeleteResponse(success=True, message="删除成功")
         else:
             return DeleteResponse(success=False, message="删除失败，文档可能不存在")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/knowledge/batch-delete", response_model=DeleteResponse)
+@limiter.limit("10/minute")
+async def batch_delete_documents(
+    request: Request,
+    body: BatchDeleteRequest,
+    knowledge_service=Depends(get_knowledge_service),
+    project=Depends(resolve_project),
+):
+    """批量删除文档接口。"""
+    if not body.doc_ids:
+        raise HTTPException(status_code=400, detail="文档 ID 列表不能为空")
+    try:
+        count = await knowledge_service.batch_delete_documents(
+            doc_ids=body.doc_ids,
+            project_id=project.project_id,
+        )
+        return DeleteResponse(
+            success=count > 0,
+            message=f"成功删除 {count}/{len(body.doc_ids)} 篇文档",
+        )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -465,14 +631,14 @@ async def search(
     request: Request,
     body: SearchRequest,
     knowledge_service=Depends(get_knowledge_service),
-    tenant=Depends(resolve_tenant),
+    project=Depends(resolve_project),
 ):
     """搜索接口。"""
     try:
         results = await knowledge_service.search(
             query=body.query,
             top_k=body.top_k,
-            tenant_id=tenant.tenant_id,
+            project_id=project.project_id,
         )
         return [
             SearchResultResponse(
@@ -493,14 +659,14 @@ async def batch_search(
     request: Request,
     body: BatchSearchRequest,
     knowledge_service=Depends(get_knowledge_service),
-    tenant=Depends(resolve_tenant),
+    project=Depends(resolve_project),
 ):
     """批量搜索接口。"""
     try:
         batch_results = await knowledge_service.batch_search(
             queries=body.queries,
             top_k=body.top_k,
-            tenant_id=tenant.tenant_id,
+            project_id=project.project_id,
         )
         items = []
         for i, (query, results) in enumerate(zip(body.queries, batch_results)):
@@ -529,14 +695,14 @@ async def list_documents(
     page: int = 1,
     page_size: int = 10,
     knowledge_service=Depends(get_knowledge_service),
-    tenant=Depends(resolve_tenant),
+    project=Depends(resolve_project),
 ):
     """列出文档接口（分页）。"""
     try:
         docs = await knowledge_service.list_documents(
-            page=page, page_size=page_size, tenant_id=tenant.tenant_id
+            page=page, page_size=page_size, project_id=project.project_id
         )
-        total = await knowledge_service.count_documents(tenant_id=tenant.tenant_id)
+        total = await knowledge_service.count_documents(project_id=project.project_id)
         items = [
             DocumentResponse(
                 doc_id=d.doc_id,
@@ -557,230 +723,3 @@ async def list_documents(
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
-
-# ------------------------------------------------------------------
-# /api/admin/tenants 管理路由组
-# ------------------------------------------------------------------
-
-@admin_router.get("/tenants", response_model=list[TenantResponse])
-@limiter.limit("5/minute")
-async def list_tenants(request: Request, include_deleted: bool = False):
-    """租户列表（管理端）。
-
-    Args:
-        include_deleted: 是否包含已删除的租户（默认 False）。
-    """
-    _verify_admin_key(request)
-    svc = _get_tenant_service()
-    tenants = svc.list_tenants(include_deleted=include_deleted)
-    return [
-        TenantResponse(
-            tenant_id=t.tenant_id,
-            api_key=t.api_key,
-            name=t.name,
-            status=t.status,
-            llm_api_base=t.llm_api_base,
-            llm_model=t.llm_model,
-            llm_timeout=t.llm_timeout,
-            rate_limit_per_user=t.rate_limit_per_user,
-            rate_limit_global=t.rate_limit_global,
-            system_prompt=t.system_prompt,
-            created_at=t.created_at,
-            updated_at=t.updated_at,
-        )
-        for t in tenants
-    ]
-
-
-@admin_router.post("/tenants", response_model=TenantResponse)
-@limiter.limit("5/minute")
-async def create_tenant(request: Request, body: CreateTenantRequest):
-    """创建租户（管理端）。"""
-    _verify_admin_key(request)
-    svc = _get_tenant_service()
-    tenant = svc.create_tenant(
-        name=body.name,
-        status=body.status,
-        knowledge_path=body.knowledge_path,
-        llm_api_key=body.llm_api_key,
-        llm_api_base=body.llm_api_base,
-        llm_model=body.llm_model,
-        llm_timeout=body.llm_timeout,
-        rate_limit_per_user=body.rate_limit_per_user,
-        rate_limit_global=body.rate_limit_global,
-        system_prompt=body.system_prompt,
-    )
-    return TenantResponse(
-        tenant_id=tenant.tenant_id,
-        api_key=tenant.api_key,
-        name=tenant.name,
-        status=tenant.status,
-        llm_api_base=tenant.llm_api_base,
-        llm_model=tenant.llm_model,
-        llm_timeout=tenant.llm_timeout,
-        rate_limit_per_user=tenant.rate_limit_per_user,
-        rate_limit_global=tenant.rate_limit_global,
-        system_prompt=tenant.system_prompt,
-        created_at=tenant.created_at,
-        updated_at=tenant.updated_at,
-    )
-
-
-@admin_router.get("/tenants/{tenant_id}", response_model=TenantResponse)
-@limiter.limit("5/minute")
-async def get_tenant(request: Request, tenant_id: str):
-    """获取租户详情（管理端）。"""
-    _verify_admin_key(request)
-    svc = _get_tenant_service()
-    t = svc.get_by_id(tenant_id)
-    if not t:
-        raise HTTPException(status_code=404, detail=f"租户不存在: {tenant_id}")
-    return TenantResponse(
-        tenant_id=t.tenant_id,
-        api_key=t.api_key,
-        name=t.name,
-        status=t.status,
-        llm_api_base=t.llm_api_base,
-        llm_model=t.llm_model,
-        llm_timeout=t.llm_timeout,
-        rate_limit_per_user=t.rate_limit_per_user,
-        rate_limit_global=t.rate_limit_global,
-        system_prompt=t.system_prompt,
-        created_at=t.created_at,
-        updated_at=t.updated_at,
-    )
-
-
-@admin_router.put("/tenants/{tenant_id}", response_model=TenantResponse)
-@limiter.limit("5/minute")
-async def update_tenant(request: Request, tenant_id: str, body: UpdateTenantRequest):
-    """更新租户（管理端）。"""
-    _verify_admin_key(request)
-    svc = _get_tenant_service()
-    try:
-        t = svc.update_tenant(
-            tenant_id=tenant_id,
-            name=body.name or "",
-            status=body.status or "",
-            knowledge_path=body.knowledge_path or "",
-            llm_api_key=body.llm_api_key or "",
-            llm_api_base=body.llm_api_base or "",
-            llm_model=body.llm_model or "",
-            llm_timeout=body.llm_timeout or 0,
-            rate_limit_per_user=body.rate_limit_per_user or "",
-            rate_limit_global=body.rate_limit_global or "",
-            system_prompt=body.system_prompt,
-        )
-    except TenantNotFoundError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-    return TenantResponse(
-        tenant_id=t.tenant_id,
-        api_key=t.api_key,
-        name=t.name,
-        status=t.status,
-        llm_api_base=t.llm_api_base,
-        llm_model=t.llm_model,
-        llm_timeout=t.llm_timeout,
-        rate_limit_per_user=t.rate_limit_per_user,
-        rate_limit_global=t.rate_limit_global,
-        system_prompt=t.system_prompt,
-        created_at=t.created_at,
-        updated_at=t.updated_at,
-    )
-
-
-@admin_router.delete("/tenants/{tenant_id}", response_model=DeleteResponse)
-@limiter.limit("5/minute")
-async def delete_tenant_endpoint(request: Request, tenant_id: str):
-    """删除租户（管理端，软删除）。
-
-    删除流程：
-      1. 软删除租户记录（标记 status=deleted）
-      2. 同步删除该租户在 Zvec 中的所有知识库文档
-      3. 返回被删除的文档数
-    """
-    _verify_admin_key(request)
-    svc = _get_tenant_service()
-
-    # 确认租户存在
-    tenant = svc.get_by_id(tenant_id)
-    if not tenant:
-        raise HTTPException(status_code=404, detail=f"租户不存在: {tenant_id}")
-
-    # 同步删除该租户的知识库文档
-    vector_store = getattr(request.app.state, "vector_store", None)
-    deleted_doc_count = 0
-    if vector_store and hasattr(vector_store, "adelete_by_tenant_id"):
-        try:
-            deleted_doc_count = await vector_store.adelete_by_tenant_id(tenant_id)
-        except Exception as e:
-            logger.warning(f"删除租户文档失败，但不阻断租户删除: {e}")
-
-    success = svc.delete_tenant(tenant_id)
-    if success:
-        message = f"删除成功"
-        if deleted_doc_count > 0:
-            message += f"（同步删除 {deleted_doc_count} 篇文档）"
-        return DeleteResponse(success=True, message=message)
-    raise HTTPException(status_code=404, detail=f"租户不存在: {tenant_id}")
-
-
-@admin_router.post("/tenants/{tenant_id}/rotate-key", response_model=TenantKeyResponse)
-@limiter.limit("5/minute")
-async def rotate_api_key(request: Request, tenant_id: str):
-    """轮换租户 API Key（管理端）。"""
-    _verify_admin_key(request)
-    svc = _get_tenant_service()
-    try:
-        new_key = svc.rotate_api_key(tenant_id)
-    except TenantNotFoundError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-    return TenantKeyResponse(api_key=new_key)
-
-
-@admin_router.get("/tenants/{tenant_id}/stats", response_model=TenantStatsResponse)
-@limiter.limit("5/minute")
-async def get_tenant_stats(request: Request, tenant_id: str):
-    """获取租户统计（管理端）。"""
-    _verify_admin_key(request)
-    svc = _get_tenant_service()
-    t = svc.get_by_id(tenant_id)
-    if not t:
-        raise HTTPException(status_code=404, detail=f"租户不存在: {tenant_id}")
-
-    # 从 Zvec 查询文档数
-    vector_store = request.app.state.vector_store if hasattr(request.app.state, "vector_store") else None
-    doc_count = 0
-    if vector_store and hasattr(vector_store, "count"):
-        try:
-            doc_count = vector_store.count(tenant_id=tenant_id)
-        except Exception:
-            pass
-
-    # 从统计注册表读取真实调用数据
-    stats_registry = getattr(request.app.state, "stats_registry", None)
-    if stats_registry is not None:
-        stats = stats_registry.get_stats(tenant_id)
-        if stats is not None:
-            return TenantStatsResponse(
-                tenant_id=tenant_id,
-                document_count=doc_count,
-                total_calls=stats.total_calls,
-                prompt_tokens=stats.prompt_tokens,
-                completion_tokens=stats.completion_tokens,
-                cache_hit_rate=stats.cache_hit_rate,
-                created_at=t.created_at,
-                last_request=int(stats.last_call_at),
-            )
-
-    return TenantStatsResponse(
-        tenant_id=tenant_id,
-        document_count=doc_count,
-        total_calls=0,
-        prompt_tokens=0,
-        completion_tokens=0,
-        cache_hit_rate=0.0,
-        created_at=t.created_at,
-        last_request=0,
-    )

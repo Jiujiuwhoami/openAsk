@@ -1,7 +1,6 @@
 """检索引擎：编排 RAG 完整流程（嵌入→检索→重排序→生成→缓存）。
 
-新增：查询 Embedding 缓存 — 相同 query 跳过 Sentence-BERT 编码，
-直接从内存返回之前算好的向量，可节省 50-200ms/请求。
+多轮对话支持：当传入 messages 时，跳过 LLM 响应缓存并透传历史到 LLM 客户端。
 """
 
 import asyncio
@@ -35,12 +34,14 @@ class RetrievalResult:
         cache_hit: bool = False,
         llm_used: bool = True,
         reranked: bool = False,
+        handoff_suggested: bool = False,
     ):
         self._answer = answer
         self._sources = sources
         self._cache_hit = cache_hit
         self._llm_used = llm_used
         self._reranked = reranked
+        self._handoff_suggested = handoff_suggested
 
     @property
     def answer(self) -> str:
@@ -61,6 +62,10 @@ class RetrievalResult:
     @property
     def reranked(self) -> bool:
         return self._reranked
+
+    @property
+    def handoff_suggested(self) -> bool:
+        return self._handoff_suggested
 
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, RetrievalResult):
@@ -85,24 +90,10 @@ class Retriever:
     1. 将用户查询转为向量（EmbeddingService，异步）
     2. 查询 LLM 响应缓存（CacheBackend，异步）
     3. 缓存命中 → 直接返回
-    4. 缓存未命中 → 向量检索召回（VectorStore，异步）→ 重排序精排（Reranker）→ 构建上下文 → 调用 LLM → 返回结果 → 写入缓存（异步）
+    4. 缓存未命中或有对话历史 → 向量检索召回（VectorStore，异步）→ 重排序精排（Reranker）
+       → 构建上下文 → 调用 LLM（携带历史消息）→ 返回结果 → 写入缓存（无历史时）
 
-    容错策略：
-    - 缓存查询失败 → 降级为直接向量检索（不阻断）
-    - 重排序失败 → 降级为不重排序（不阻断）
-    - LLM 调用失败 → 降级为返回检索到的文档内容作为答案（兜底）
-    - 任何组件故障都不会导致整个请求失败
-
-    Examples:
-        >>> retriever = Retriever(
-        ...     embedding_service=SentenceBertEmbeddingService(),
-        ...     vector_store=ZvecStore(),
-        ...     cache_backend=LLMResponseCache(),
-        ...     llm_client=SenseNovaClient(),
-        ... )
-        >>> result = await retriever.retrieve("退货政策是什么？")
-        >>> print(result.answer)
-        >>> print([s.title for s in result.sources])
+    多轮对话：当传入 messages 时，跳过缓存，并将历史消息透传给 LLM 客户端。
     """
 
     def __init__(
@@ -126,7 +117,7 @@ class Retriever:
 
     def _record_stats(
         self,
-        tenant_id: str,
+        project_id: str,
         *,
         cache_hit: bool,
         prompt_tokens: int = 0,
@@ -136,7 +127,7 @@ class Retriever:
         if self._stats_registry is not None:
             try:
                 self._stats_registry.record(
-                    tenant_id=tenant_id,
+                    project_id=project_id,
                     prompt_tokens=prompt_tokens,
                     completion_tokens=completion_tokens,
                     cache_hit=cache_hit,
@@ -144,29 +135,57 @@ class Retriever:
             except Exception as e:
                 logger.warning(f"统计记录失败: {e}")
 
+    @staticmethod
+    def _check_handoff_needed(
+        sources: List[SearchResult],
+        query: str,
+    ) -> bool:
+        """判断是否需要建议转人工客服。
+
+        条件（任一满足即返回 True）：
+        1. 无来源文档
+        2. 所有来源的最高分 < 0.35
+        3. 查询为空
+        """
+        if not query.strip():
+            return True
+        if not sources:
+            return True
+        max_score = max((s.score for s in sources if s.score is not None), default=0.0)
+        if max_score < 0.35:
+            return True
+        return False
+
     async def retrieve(
         self,
         query: str,
         top_k: int = 5,
         system_prompt: Optional[str] = None,
-        tenant_id: str = "default",
+        project_id: str = "default",
         cache_backend: Optional[CacheBackend] = None,
+        messages: Optional[List[dict]] = None,
+        language: str = "zh",
     ) -> RetrievalResult:
         """执行检索，返回回答和来源（异步）。
 
         Args:
             query: 用户查询文本
             top_k: 返回的最相关文档数量
+            system_prompt: 自定义系统提示词
+            project_id: 项目 ID
+            cache_backend: 缓存后端（默认使用实例的）
+            messages: 多轮对话历史（[{role, content}]）
+            language: 回答语言（zh/en）
 
         Returns:
-            RetrievalResult：包含回答、来源、缓存命中状态
+            RetrievalResult：包含回答、来源、缓存命中状态、handoff 建议
         """
         effective_prompt = system_prompt or self._system_prompt
 
         if not query.strip():
             logger.warning("空查询，直接返回")
             return RetrievalResult(
-                answer="请提供有效的查询内容", sources=[], llm_used=False
+                answer="请提供有效的查询内容", sources=[], llm_used=False, handoff_suggested=True
             )
 
         try:
@@ -177,19 +196,25 @@ class Retriever:
                 answer="系统暂无法处理该查询，请稍后重试",
                 sources=[],
                 llm_used=False,
+                handoff_suggested=True,
             )
 
-        cached_answer = await self._check_cache(query_vector, cache_backend=cache_backend)
-        if cached_answer:
-            logger.debug("缓存命中，直接返回")
-            sources = await self._get_sources_for_cache(query_vector, top_k, tenant_id=tenant_id)
-            self._record_stats(tenant_id, cache_hit=True)
-            return RetrievalResult(
-                answer=cached_answer,
-                sources=sources,
-                cache_hit=True,
-                llm_used=False,
-            )
+        # 有历史消息时跳过缓存（多轮上下文不同，缓存会错误命中）
+        if not messages:
+            cached_answer = await self._check_cache(query_vector, cache_backend=cache_backend)
+            if cached_answer:
+                logger.debug("缓存命中，直接返回")
+                sources = await self._get_sources_for_cache(query_vector, top_k, project_id=project_id)
+                self._record_stats(project_id, cache_hit=True)
+                return RetrievalResult(
+                    answer=cached_answer,
+                    sources=sources,
+                    cache_hit=True,
+                    llm_used=False,
+                    handoff_suggested=False,
+                )
+        else:
+            logger.debug("有对话历史，跳过缓存")
 
         try:
             recall_top_k = (
@@ -197,13 +222,14 @@ class Retriever:
                 if self._reranker and self._reranker.is_enabled
                 else top_k
             )
-            search_results = await self._vector_search(query_vector, recall_top_k, tenant_id=tenant_id)
+            search_results = await self._vector_search(query_vector, recall_top_k, project_id=project_id)
         except VectorStoreError as e:
             logger.error(f"向量检索失败: {e}")
             return RetrievalResult(
                 answer="无法检索到相关信息，请稍后重试",
                 sources=[],
                 llm_used=False,
+                handoff_suggested=True,
             )
 
         if not search_results:
@@ -212,6 +238,7 @@ class Retriever:
                 answer="未找到相关信息",
                 sources=[],
                 llm_used=False,
+                handoff_suggested=True,
             )
 
         reranked = False
@@ -225,10 +252,17 @@ class Retriever:
             except Exception as e:
                 logger.warning(f"重排序失败，降级为不重排序: {e}")
 
-        answer = await self._generate_answer(query, search_results, system_prompt=effective_prompt)
-        await self._cache_result(query_vector, answer, cache_backend=cache_backend)
+        handoff = self._check_handoff_needed(search_results, query)
+        answer = await self._generate_answer(
+            query, search_results, system_prompt=effective_prompt,
+            messages=messages, language=language,
+        )
 
-        self._record_stats(tenant_id, cache_hit=False)
+        # 无历史时写入缓存
+        if not messages:
+            await self._cache_result(query_vector, answer, cache_backend=cache_backend)
+
+        self._record_stats(project_id, cache_hit=False)
 
         logger.info(f"查询: '{query[:100]}' | 回答: {len(answer)} 字符 | 来源: {len(search_results)} 篇")
         return RetrievalResult(
@@ -237,6 +271,7 @@ class Retriever:
             cache_hit=False,
             llm_used=True,
             reranked=reranked,
+            handoff_suggested=handoff,
         )
 
     async def retrieve_stream(
@@ -244,24 +279,21 @@ class Retriever:
         query: str,
         top_k: int = 5,
         system_prompt: Optional[str] = None,
-        tenant_id: str = "default",
+        project_id: str = "default",
         cache_backend: Optional[CacheBackend] = None,
+        messages: Optional[List[dict]] = None,
+        language: str = "zh",
     ) -> AsyncGenerator[dict, None]:
         """流式检索，逐事件返回结果（异步生成器）。
 
         事件类型:
-          - sources: 检索到的来源文档（在 LLM 生成前推送）
+          - sources: 检索到的来源文档
+          - reasoning_delta: 推理链文本增量
           - answer_delta: 回答文本增量
+          - cache_hit: 是否缓存命中
+          - handoff_suggested: 是否建议转人工
           - done: 流式结束
           - error: 错误信息
-
-        Args:
-            query: 用户查询文本
-            top_k: 返回的最相关文档数量
-            system_prompt: 租户自定义系统 Prompt
-
-        Yields:
-            事件字典: {"event": str, "data": ...}
         """
         if not query.strip():
             yield {"event": "error", "data": "请提供有效的查询内容"}
@@ -276,25 +308,29 @@ class Retriever:
             yield {"event": "done", "data": None}
             return
 
-        cached_answer = await self._check_cache(query_vector, cache_backend=cache_backend)
-        if cached_answer:
-            logger.debug("缓存命中，直接返回")
-            sources = await self._get_sources_for_cache(query_vector, top_k, tenant_id=tenant_id)
-            sources_data = [
-                {
-                    "doc_id": s.doc_id,
-                    "title": s.title,
-                    "content": s.content,
-                    "score": round(s.score, 4),
-                }
-                for s in sources
-            ]
-            yield {"event": "sources", "data": sources_data}
-            self._record_stats(tenant_id, cache_hit=True)
-            yield {"event": "cache_hit", "data": True}
-            yield {"event": "answer_delta", "data": cached_answer}
-            yield {"event": "done", "data": None}
-            return
+        if not messages:
+            cached_answer = await self._check_cache(query_vector, cache_backend=cache_backend)
+            if cached_answer:
+                logger.debug("缓存命中，直接返回")
+                sources = await self._get_sources_for_cache(query_vector, top_k, project_id=project_id)
+                sources_data = [
+                    {
+                        "doc_id": s.doc_id,
+                        "title": s.title,
+                        "content": s.content,
+                        "score": round(s.score, 4),
+                    }
+                    for s in sources
+                ]
+                yield {"event": "sources", "data": sources_data}
+                self._record_stats(project_id, cache_hit=True)
+                yield {"event": "cache_hit", "data": True}
+                yield {"event": "handoff_suggested", "data": False}
+                yield {"event": "answer_delta", "data": cached_answer}
+                yield {"event": "done", "data": None}
+                return
+        else:
+            logger.debug("有对话历史，跳过缓存")
 
         try:
             recall_top_k = (
@@ -302,7 +338,7 @@ class Retriever:
                 if self._reranker and self._reranker.is_enabled
                 else top_k
             )
-            search_results = await self._vector_search(query_vector, recall_top_k, tenant_id=tenant_id)
+            search_results = await self._vector_search(query_vector, recall_top_k, project_id=project_id)
         except VectorStoreError as e:
             logger.error(f"向量检索失败: {e}")
             yield {"event": "error", "data": "无法检索到相关信息，请稍后重试"}
@@ -312,6 +348,7 @@ class Retriever:
         if not search_results:
             logger.debug("未检索到相关文档")
             yield {"event": "sources", "data": []}
+            yield {"event": "handoff_suggested", "data": True}
             yield {"event": "answer_delta", "data": "未找到相关信息"}
             yield {"event": "done", "data": None}
             return
@@ -339,6 +376,9 @@ class Retriever:
         yield {"event": "sources", "data": sources_data}
         yield {"event": "cache_hit", "data": False}
 
+        handoff = self._check_handoff_needed(search_results, query)
+        yield {"event": "handoff_suggested", "data": handoff}
+
         effective_prompt = system_prompt or self._system_prompt
         answer_chunks: list[str] = []
         try:
@@ -350,7 +390,8 @@ class Retriever:
             else:
                 if hasattr(self._llm_client, "stream_answer"):
                     async for chunk in self._llm_client.stream_answer(
-                        query, context, system_prompt=effective_prompt
+                        query, context, system_prompt=effective_prompt,
+                        messages=messages, language=language,
                     ):
                         if chunk["type"] == "reasoning":
                             yield {"event": "reasoning_delta", "data": chunk["content"]}
@@ -359,7 +400,8 @@ class Retriever:
                             yield {"event": "answer_delta", "data": chunk["content"]}
                 else:
                     answer = await self._llm_client.generate_answer(
-                        query, context, system_prompt=effective_prompt
+                        query, context, system_prompt=effective_prompt,
+                        messages=messages, language=language,
                     )
                     answer_chunks.append(answer)
                     yield {"event": "answer_delta", "data": answer}
@@ -367,9 +409,11 @@ class Retriever:
             full_answer = "".join(answer_chunks)
             logger.info(f"[流式] 查询: '{query[:100]}' | 回答: {len(full_answer)} 字符 | 来源: {len(search_results)} 篇")
             logger.debug(f"LLM 流式生成完成，长度: {len(full_answer)}")
-            await self._cache_result(query_vector, full_answer, cache_backend=cache_backend)
 
-            self._record_stats(tenant_id, cache_hit=False)
+            if not messages:
+                await self._cache_result(query_vector, full_answer, cache_backend=cache_backend)
+
+            self._record_stats(project_id, cache_hit=False)
 
         except SenseNovaAPIError as e:
             logger.error(f"LLM 调用失败，降级为返回原始文档: {e}")
@@ -383,11 +427,7 @@ class Retriever:
         yield {"event": "done", "data": {"reranked": reranked}}
 
     async def _encode_query(self, query: str) -> np.ndarray:
-        """将查询文本编码为向量（异步）。
-
-        优先从 Embedding 缓存获取，命中则跳过 Sentence-BERT 编码，
-        可节省 50-200ms/请求。miss 时正常编码并写入缓存。
-        """
+        """将查询文本编码为向量（异步）。"""
         if self._embedding_cache is not None:
             cached = await self._embedding_cache.aget(query)
             if cached is not None:
@@ -411,12 +451,12 @@ class Retriever:
             logger.warning(f"缓存查询失败，降级为直接检索: {e}")
             return None
 
-    async def _get_sources_for_cache(self, query_vector: np.ndarray, top_k: int, tenant_id: str = "default") -> List[SearchResult]:
-        """缓存命中时，获取来源文档（用于引用展示，异步）。自动按 tenant_id 过滤。"""
+    async def _get_sources_for_cache(self, query_vector: np.ndarray, top_k: int, project_id: str = "default") -> List[SearchResult]:
+        """缓存命中时，获取来源文档（用于引用展示，异步）。"""
         try:
             if hasattr(self._vector_store, "asearch"):
-                return await self._vector_store.asearch(query_vector, top_k=top_k, tenant_id=tenant_id)
-            return self._vector_store.search(query_vector, top_k=top_k, tenant_id=tenant_id)
+                return await self._vector_store.asearch(query_vector, top_k=top_k, project_id=project_id)
+            return self._vector_store.search(query_vector, top_k=top_k, project_id=project_id)
         except Exception as e:
             logger.warning(f"缓存命中但获取来源失败: {e}")
             return []
@@ -425,12 +465,12 @@ class Retriever:
         self,
         query_vector: np.ndarray,
         top_k: int,
-        tenant_id: str = "default",
+        project_id: str = "default",
     ) -> List[SearchResult]:
-        """执行向量检索，返回最相关的文档（异步）。自动按 tenant_id 过滤。"""
+        """执行向量检索，返回最相关的文档（异步）。"""
         if hasattr(self._vector_store, "asearch"):
-            return await self._vector_store.asearch(query_vector, top_k=top_k, tenant_id=tenant_id)
-        return self._vector_store.search(query_vector, top_k=top_k, tenant_id=tenant_id)
+            return await self._vector_store.asearch(query_vector, top_k=top_k, project_id=project_id)
+        return self._vector_store.search(query_vector, top_k=top_k, project_id=project_id)
 
     def _build_context(self, search_results: List[SearchResult]) -> List[str]:
         """从检索结果构建上下文列表。"""
@@ -447,18 +487,18 @@ class Retriever:
         query: str,
         search_results: List[SearchResult],
         system_prompt: Optional[str] = None,
+        messages: Optional[List[dict]] = None,
+        language: str = "zh",
     ) -> str:
-        """基于检索结果生成回答（异步）。
-
-        如果 LLM 调用失败，降级为返回检索到的文档内容作为答案。
-        """
+        """基于检索结果生成回答（异步）。"""
         context = self._build_context(search_results)
         if not context:
             return "\n\n".join([r.title for r in search_results if r.title]) or "未找到相关信息"
 
         try:
             answer = await self._llm_client.generate_answer(
-                query, context, system_prompt=system_prompt
+                query, context, system_prompt=system_prompt,
+                messages=messages, language=language,
             )
             logger.debug(f"LLM 生成回答成功，长度: {len(answer)}")
             return answer

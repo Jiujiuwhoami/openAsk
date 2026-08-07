@@ -71,7 +71,7 @@ class ApiSettings(BaseSettings):
     # 字段类型用 str | List[str]，避免 pydantic-settings 对 List 字段误做 JSON 解析
     #（Docker 环境变量 API_CORS_ORIGINS=http://a,http://b 会被 json.loads 报 JSONDecodeError）
     cors_origins: str | List[str] = "http://localhost:3000,http://localhost:8000"
-    api_key: str = ""
+    frontend_url: str = "http://localhost:5173"
 
     def _normalize_cors_origins(self, v: "str | List[str]") -> List[str]:
         if isinstance(v, list):
@@ -153,15 +153,37 @@ class MultiModalSettings(BaseSettings):
     timeout: int = 30
 
 
-class TenantStorageSettings(BaseSettings):
-    """租户存储配置（SQLite 优先）。"""
+class AuthSettings(BaseSettings):
+    """OAuth2 认证配置。"""
 
-    model_config = SettingsConfigDict(**_SETTINGS_BASE_CONFIG, env_prefix="TENANT_")
+    model_config = SettingsConfigDict(**_SETTINGS_BASE_CONFIG, env_prefix="AUTH_")
 
-    storage_type: str = "sqlite"
-    storage_path: str = "data/tenants.db"
-    default_tenant_id: str = "default"
-    default_tenant_api_key: str = ""
+    secret_key: str = "change-me-in-production"
+    algorithm: str = "HS256"
+    access_token_expire_minutes: int = 1440  # 24 hours
+
+
+class StripeSettings(BaseSettings):
+    """Stripe 支付配置。"""
+
+    model_config = SettingsConfigDict(**_SETTINGS_BASE_CONFIG, env_prefix="STRIPE_")
+
+    secret_key: str = ""
+    publishable_key: str = ""
+    webhook_secret: str = ""
+    price_free: str = ""
+    price_pro: str = ""
+    price_enterprise: str = ""
+
+
+class EmailSettings(BaseSettings):
+    """邮件服务配置。"""
+
+    model_config = SettingsConfigDict(**_SETTINGS_BASE_CONFIG, env_prefix="EMAIL_")
+
+    provider: str = "console"  # console | resend
+    from_addr: str = "noreply@openask.dev"
+    resend_api_key: str = ""
 
 
 class RerankerSettings(BaseSettings):
@@ -200,7 +222,9 @@ class Settings(BaseSettings):
     metrics: MetricsSettings = Field(default_factory=MetricsSettings)
     multimodal: MultiModalSettings = Field(default_factory=MultiModalSettings)
     reranker: RerankerSettings = Field(default_factory=RerankerSettings)
-    tenant: TenantStorageSettings = Field(default_factory=TenantStorageSettings)
+    auth: AuthSettings = Field(default_factory=AuthSettings)
+    email: EmailSettings = Field(default_factory=EmailSettings)
+    stripe: StripeSettings = Field(default_factory=StripeSettings)
 
 
 settings = Settings()
@@ -220,5 +244,5 @@ __all__ = [
     "MetricsSettings",
     "MultiModalSettings",
     "RerankerSettings",
-    "TenantStorageSettings",
+    "AuthSettings",
 ]

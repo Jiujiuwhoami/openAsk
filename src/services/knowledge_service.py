@@ -1,13 +1,14 @@
 """知识库业务服务：编排文档加载→切分→嵌入→存储的完整流程（异步）。"""
 
 import asyncio
+import hashlib
 import os
 import uuid
 from typing import List, Optional
 
 from langchain_core.documents import Document
 
-from src.domain.models import DEFAULT_TENANT_ID, Document as DomainDocument, SearchResult
+from src.domain.models import DEFAULT_PROJECT_ID, Document as DomainDocument, SearchResult
 from src.domain.exceptions import KnowledgeBaseError
 from src.infrastructure.embedding_service import SentenceBertEmbeddingService
 from src.infrastructure.zvec_store import ZvecStore
@@ -84,22 +85,38 @@ class KnowledgeService:
         content: str,
         tags: Optional[List[str]] = None,
         source: Optional[str] = None,
-        tenant_id: str = DEFAULT_TENANT_ID,
+        project_id: str = DEFAULT_PROJECT_ID,
+        skip_duplicate_check: bool = False,
     ) -> DomainDocument:
-        """从文本创建文档并存储到向量库（异步）。"""
+        """从文本创建文档并存储到向量库（异步）。
+
+        Args:
+            skip_duplicate_check: 是否跳过内容去重检查
+        """
+        # 内容去重
+        if not skip_duplicate_check:
+            content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+            existing = await self._vector_store.asearch_by_hash(content_hash, project_id=project_id)
+            if existing:
+                from src.domain.exceptions import KnowledgeBaseError
+                raise KnowledgeBaseError(f"内容已存在: {existing.title}")
+
         doc = DomainDocument(
             doc_id=str(uuid.uuid4()),
             content=content,
             title=title,
             tags=tags or [],
             source=source,
-            tenant_id=tenant_id,
+            project_id=project_id,
         )
 
-        embedding = await self._embedding_service.encode(doc.content)
-        await self._vector_store.ainsert(doc, embedding, tenant_id=tenant_id)
+        # 存储 content_hash 到文档元数据
+        content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
 
-        logger.info(f"文档已创建并存储: {doc.title} ({doc.doc_id}) [tenant={tenant_id}]")
+        embedding = await self._embedding_service.encode(doc.content)
+        await self._vector_store.ainsert(doc, embedding, project_id=project_id, content_hash=content_hash)
+
+        logger.info(f"文档已创建并存储: {doc.title} ({doc.doc_id}) [project={project_id}]")
         return doc
 
     async def update_document(
@@ -109,10 +126,10 @@ class KnowledgeService:
         content: Optional[str] = None,
         tags: Optional[List[str]] = None,
         source: Optional[str] = None,
-        tenant_id: str = DEFAULT_TENANT_ID,
+        project_id: str = DEFAULT_PROJECT_ID,
     ) -> DomainDocument:
         """更新文档（异步）。"""
-        existing_doc = await self._vector_store.aget(doc_id, tenant_id=tenant_id)
+        existing_doc = await self._vector_store.aget(doc_id, project_id=project_id)
         if not existing_doc:
             raise KnowledgeBaseError(f"文档不存在: {doc_id}")
 
@@ -131,31 +148,31 @@ class KnowledgeService:
             title=title,
             tags=tags,
             source=source,
-            tenant_id=existing_doc.tenant_id,
+            project_id=existing_doc.project_id,
             created_at=existing_doc.created_at,
         )
 
         embedding = await self._embedding_service.encode(content)
-        await self._vector_store.aupsert(updated_doc, embedding, tenant_id=tenant_id)
+        await self._vector_store.aupsert(updated_doc, embedding, project_id=project_id)
 
-        logger.info(f"文档已更新: {doc_id} [tenant={tenant_id}]")
+        logger.info(f"文档已更新: {doc_id} [project={project_id}]")
         return updated_doc
 
     async def load_and_store_document(
-        self, file_path: str, tenant_id: str = DEFAULT_TENANT_ID
+        self, file_path: str, project_id: str = DEFAULT_PROJECT_ID
     ) -> DomainDocument:
         """加载文档并存储到向量库（异步）。"""
         doc = await self.load_document(file_path)
-        # 写入 tenant_id
-        doc._tenant_id = tenant_id
+        # 写入 project_id
+        doc._project_id = project_id
 
         embedding = await self._embedding_service.encode(doc.content)
-        await self._vector_store.ainsert(doc, embedding, tenant_id=tenant_id)
+        await self._vector_store.ainsert(doc, embedding, project_id=project_id)
 
-        logger.info(f"文档已加载并存储: {doc.title} ({doc.doc_id}) [tenant={tenant_id}]")
+        logger.info(f"文档已加载并存储: {doc.title} ({doc.doc_id}) [project={project_id}]")
         return doc
 
-    async def load_faq_documents(self, tenant_id: str = DEFAULT_TENANT_ID) -> List[DomainDocument]:
+    async def load_faq_documents(self, project_id: str = DEFAULT_PROJECT_ID) -> List[DomainDocument]:
         """加载所有 FAQ 文档并存储到向量库（异步批量）。"""
         if not os.path.exists(FAQ_DIR):
             raise KnowledgeBaseError(f"FAQ 目录不存在: {FAQ_DIR}")
@@ -175,16 +192,16 @@ class KnowledgeService:
         if not docs_to_store:
             return []
 
-        # 写入 tenant_id
+        # 写入 project_id
         for doc in docs_to_store:
-            doc._tenant_id = tenant_id
+            doc._project_id = project_id
 
         contents = [doc.content for doc in docs_to_store]
         embeddings = await self._embedding_service.encode_batch(contents)
         for i, doc in enumerate(docs_to_store):
-            await self._vector_store.ainsert(doc, embeddings[i], tenant_id=tenant_id)
+            await self._vector_store.ainsert(doc, embeddings[i], project_id=project_id)
 
-        logger.info(f"FAQ 文档加载完成，共 {len(docs_to_store)} 条 [tenant={tenant_id}]")
+        logger.info(f"FAQ 文档加载完成，共 {len(docs_to_store)} 条 [project={project_id}]")
         return docs_to_store
 
     async def load_directory(
@@ -243,39 +260,53 @@ class KnowledgeService:
         return docs_to_store
 
     async def delete_document(
-        self, doc_id: str, tenant_id: str = DEFAULT_TENANT_ID
+        self, doc_id: str, project_id: str = DEFAULT_PROJECT_ID
     ) -> bool:
         """删除指定文档（异步）。"""
-        return await self._vector_store.adelete(doc_id, tenant_id=tenant_id)
+        return await self._vector_store.adelete(doc_id, project_id=project_id)
 
-    async def count_documents(self, tenant_id: str = DEFAULT_TENANT_ID) -> int:
+    async def batch_delete_documents(
+        self, doc_ids: List[str], project_id: str = DEFAULT_PROJECT_ID
+    ) -> int:
+        """批量删除文档（异步）。返回成功删除的数量。"""
+        count = 0
+        for doc_id in doc_ids:
+            try:
+                if await self._vector_store.adelete(doc_id, project_id=project_id):
+                    count += 1
+            except Exception as e:
+                logger.warning(f"批量删除失败: {doc_id} | {e}")
+        logger.info(f"批量删除完成: {count}/{len(doc_ids)} [project={project_id}]")
+        return count
+
+    async def count_documents(self, project_id: str = DEFAULT_PROJECT_ID) -> int:
         """返回当前知识库文档总数（异步）。"""
-        return await self._vector_store.acount(tenant_id=tenant_id)
+        return await self._vector_store.acount(project_id=project_id)
 
     async def get_by_id(
-        self, doc_id: str, tenant_id: str = DEFAULT_TENANT_ID
+        self, doc_id: str, project_id: str = DEFAULT_PROJECT_ID
     ) -> Optional[DomainDocument]:
         """根据文档 ID 获取文档（异步）。"""
-        return await self._vector_store.aget(doc_id, tenant_id=tenant_id)
+        return await self._vector_store.aget(doc_id, project_id=project_id)
 
     async def list_documents(
-        self, page: int = 1, page_size: int = 10, tenant_id: str = DEFAULT_TENANT_ID
+        self, page: int = 1, page_size: int = 10, project_id: str = DEFAULT_PROJECT_ID
     ) -> List[DomainDocument]:
         """分页列出所有文档（异步）。
 
         使用 ZvecStore 的分页查询方法，避免加载全部文档到内存。
         """
         return await self._vector_store.alist_paginated(
-            page=page, page_size=page_size, tenant_id=tenant_id
+            page=page, page_size=page_size, project_id=project_id
         )
 
     async def search(
-        self, query: str, top_k: int = 5, tenant_id: str = DEFAULT_TENANT_ID
+        self, query: str, top_k: int = 5, project_id: str = DEFAULT_PROJECT_ID
     ) -> List[SearchResult]:
         """检索知识库，返回最相似的文档及分数（异步）。"""
         embedding = await self._embedding_service.encode(query)
         results = await self._vector_store.asearch(
-            embedding, top_k=top_k, tenant_id=tenant_id
+            embedding, top_k=top_k, project_id=project_id
         )
         return list(results)
 
@@ -283,7 +314,7 @@ class KnowledgeService:
         self,
         queries: List[str],
         top_k: int = 5,
-        tenant_id: str = DEFAULT_TENANT_ID,
+        project_id: str = DEFAULT_PROJECT_ID,
     ) -> List[List[SearchResult]]:
         """批量检索知识库（异步）。
 
@@ -298,13 +329,13 @@ class KnowledgeService:
             batch_results = await self._vector_store.abatch_search(
                 [embeddings[i] for i in range(len(queries))],
                 top_k=top_k,
-                tenant_id=tenant_id,
+                project_id=project_id,
             )
         else:
             batch_results = []
             for i in range(len(queries)):
                 results = await self._vector_store.asearch(
-                    embeddings[i], top_k=top_k, tenant_id=tenant_id
+                    embeddings[i], top_k=top_k, project_id=project_id
                 )
                 batch_results.append(results)
 

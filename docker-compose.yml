@@ -1,4 +1,17 @@
 services:
+  redis:
+    image: redis:7-alpine
+    container_name: openask-redis
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis-data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
   openask:
     build: .
     container_name: openask
@@ -8,18 +21,29 @@ services:
       - .env
     environment:
       - API_HOST=0.0.0.0
+      # Redis 用于多 Worker 共享限流状态
+      - RATE_LIMIT_STORAGE_URI=redis://redis:6379/0
     volumes:
       # 数据持久化（挂载父目录，zvec 自己创建子目录）
       - ./data:/app/data
       # 日志持久化
       - ./logs:/app/logs
     restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 30s
+    # 日志轮转（Docker 层面限制日志文件大小）
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   admin-panel:
     build:
@@ -29,6 +53,16 @@ services:
       - "${ADMIN_PORT:-5173}:80"
     environment:
       - API_BACKEND_URL=http://openask:8000
+      # HTTPS 部署时启用（需挂载证书到 /etc/nginx/certs）
+      # - ENABLE_HTTPS=true
+      # - SSL_CERT_PATH=/etc/nginx/certs/fullchain.pem
+      # - SSL_KEY_PATH=/etc/nginx/certs/privkey.pem
+    # HTTPS 证书挂载（可选），启用时取消注释：
+    # volumes:
+    #   - ./certs:/etc/nginx/certs:ro
     restart: unless-stopped
     depends_on:
       - openask
+
+volumes:
+  redis-data:

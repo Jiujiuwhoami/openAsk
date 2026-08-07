@@ -91,7 +91,7 @@ async def test_delete_document(mock_services):
     result = await svc.delete_document("test-doc-id")
 
     assert result is True
-    mock_vector_store.adelete.assert_called_once_with("test-doc-id", tenant_id="default")
+    mock_vector_store.adelete.assert_called_once_with("test-doc-id", project_id="default")
 
 
 @pytest.mark.asyncio
@@ -111,7 +111,7 @@ async def test_search(mock_services):
     assert isinstance(results[0], SearchResult)
     mock_embedding_service.encode.assert_called_once_with("测试查询")
     mock_vector_store.asearch.assert_called_once_with(
-        [0.1] * 384, top_k=5, tenant_id="default"
+        [0.1] * 384, top_k=5, project_id="default"
     )
 
 

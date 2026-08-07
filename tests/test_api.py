@@ -1,10 +1,7 @@
-"""API 端点测试（适配多租户架构）。
+"""API 端点测试（适配 Project 架构）。
 
-多租户改造后变更：
-  - 所有业务接口需携带 X-API-Key（/api/health 除外）
-  - 知识库 CRUD 操作透传 tenant_id
-  - Retriever 由 RetrieverFactory 按租户分发
-  - Mock 组件需兼容 tenant_id 参数
+所有业务接口需携带 X-API-Key（/api/health 除外），
+通过 ProjectService 解析为 Project 实例。
 """
 
 import os
@@ -26,7 +23,7 @@ from src.utils.config import settings
 # ================================================================
 
 TEST_API_KEY = "sk_test_api_key_for_unit"
-TEST_TENANT_ID = "test_tenant_unit"
+TEST_PROJECT_ID = "test_project_unit"
 
 
 # ================================================================
@@ -41,6 +38,7 @@ class MockRetrievalResult:
         self.sources = sources
         self.cache_hit = cache_hit
         self.llm_used = llm_used
+        self.handoff_suggested = False
 
 
 class MockDocument:
@@ -61,7 +59,7 @@ class MockDocument:
 
 
 class MockRetriever:
-    """Mock Retriever，兼容 tenant_id 参数。
+    """Mock Retriever。
 
     需要 _llm_client 属性以支持 /api/health 的健康检查。
     """
@@ -99,10 +97,10 @@ class MockRetriever:
             llm_used=True,
         )
 
-    async def retrieve(self, query, top_k=5, tenant_id=None, cache_backend=None, system_prompt=None):
+    async def retrieve(self, query, top_k=5, project_id=None, cache_backend=None, system_prompt=None, messages=None, language="zh"):
         return self._build_result(query, top_k)
 
-    async def retrieve_stream(self, query, top_k=5, tenant_id=None, cache_backend=None, system_prompt=None):
+    async def retrieve_stream(self, query, top_k=5, project_id=None, cache_backend=None, system_prompt=None, messages=None, language="zh"):
         result = self._build_result(query, top_k)
         sources_data = [
             {"doc_id": s.doc_id, "title": s.title, "content": s.content, "score": round(s.score, 4)}
@@ -125,7 +123,7 @@ class MockFactory:
         self._retriever = retriever
         self._closed = False
 
-    def get_retriever_for_tenant(self, tenant_id, tenant=None):
+    def get_retriever_for_project(self, project_id, project=None):
         if self._closed:
             raise RuntimeError("Factory 已关闭")
         return self._retriever
@@ -135,35 +133,35 @@ class MockFactory:
 
 
 class MockKnowledgeService:
-    """Mock KnowledgeService，兼容 tenant_id 透传。"""
+    """Mock KnowledgeService。"""
 
     def __init__(self):
         self._documents = {}
         self._next_id = 1
 
-    async def create_document_from_text(self, title, content, tenant_id=None, tags=None, source=None):
+    async def create_document_from_text(self, title, content, project_id=None, tags=None, source=None):
         doc_id = f"doc{self._next_id}"
         self._next_id += 1
         doc = MockDocument(doc_id=doc_id, title=title, content=content, tags=tags or [], source=source)
         self._documents[doc_id] = doc
         return doc
 
-    async def load_and_store_document(self, file_path=None, tenant_id=None):
+    async def load_and_store_document(self, file_path=None, project_id=None):
         doc_id = f"doc{self._next_id}"
         self._next_id += 1
         doc = MockDocument(doc_id=doc_id, title="测试文档", content="测试内容", tags=[], source=None)
         self._documents[doc_id] = doc
         return doc
 
-    async def get_by_id(self, doc_id, tenant_id=None):
+    async def get_by_id(self, doc_id, project_id=None):
         return self._documents.get(doc_id)
 
-    async def search(self, query, top_k=10, tenant_id=None):
+    async def search(self, query, top_k=10, project_id=None):
         if query in self._documents:
             return [self._documents[query]]
         return []
 
-    async def batch_search(self, queries, top_k=10, tenant_id=None):
+    async def batch_search(self, queries, top_k=10, project_id=None):
         results = []
         for query in queries:
             if query in self._documents:
@@ -172,22 +170,22 @@ class MockKnowledgeService:
                 results.append([])
         return results
 
-    async def delete_document(self, doc_id, tenant_id=None):
+    async def delete_document(self, doc_id, project_id=None):
         if doc_id in self._documents:
             del self._documents[doc_id]
             return True
         return False
 
-    async def count_documents(self, tenant_id=None):
+    async def count_documents(self, project_id=None):
         return len(self._documents)
 
-    async def list_documents(self, page=1, page_size=10, tenant_id=None):
+    async def list_documents(self, page=1, page_size=10, project_id=None):
         all_docs = list(self._documents.values())
         start = (page - 1) * page_size
         end = start + page_size
         return all_docs[start:end]
 
-    async def update_document(self, doc_id, tenant_id=None, title=None, content=None, tags=None, source=None):
+    async def update_document(self, doc_id, project_id=None, title=None, content=None, tags=None, source=None):
         if doc_id not in self._documents:
             from src.domain.exceptions import DocumentNotFoundError
             raise DocumentNotFoundError(f"文档不存在: {doc_id}")
@@ -207,56 +205,58 @@ class MockKnowledgeService:
         pass
 
 
-class MockTenantService:
-    """Mock TenantService，基于内存字典。
+class MockProjectService:
+    """Mock ProjectService，基于内存字典。
 
-    为测试提供 Tenant 鉴权：用 X-API-Key 查找 tenant_id。
+    为测试提供 Project 鉴权：用 X-API-Key 查找 project。
     """
 
     def __init__(self, storage_path=None):
-        self._tenants = {TEST_API_KEY: {"tenant_id": TEST_TENANT_ID, "api_key": TEST_API_KEY, "name": "Test", "status": "active"}}
+        self._projects = {
+            TEST_API_KEY: {
+                "project_id": TEST_PROJECT_ID, "api_key": TEST_API_KEY,
+                "name": "Test", "status": "active", "user_id": "test_user",
+            }
+        }
 
     def get_by_api_key(self, api_key):
-        if api_key not in self._tenants:
+        if api_key not in self._projects:
             return None
-        t = self._tenants[api_key]
-        if t["status"] != "active":
+        p = self._projects[api_key]
+        if p["status"] != "active":
             return None
-        return _tenant_from_dict(t)
+        return _project_from_dict(p)
 
-    def get_by_id(self, tenant_id):
-        for t in self._tenants.values():
-            if t["tenant_id"] == tenant_id:
-                return _tenant_from_dict(t)
+    def get_by_id(self, project_id):
+        for p in self._projects.values():
+            if p["project_id"] == project_id:
+                return _project_from_dict(p)
         return None
 
-    def ensure_default_tenant(self):
-        return self.get_by_id("default") or self.get_by_id(TEST_TENANT_ID)
-
-    def add_tenant(self, tenant_id, api_key, name="Test", status="active"):
-        self._tenants[api_key] = {
-            "tenant_id": tenant_id, "api_key": api_key,
-            "name": name, "status": status,
+    def add_project(self, project_id, api_key, name="Test", status="active"):
+        self._projects[api_key] = {
+            "project_id": project_id, "api_key": api_key,
+            "name": name, "status": status, "user_id": "test_user",
         }
 
     def set_status(self, api_key, status):
-        if api_key in self._tenants:
-            self._tenants[api_key]["status"] = status
+        if api_key in self._projects:
+            self._projects[api_key]["status"] = status
 
 
-def _tenant_from_dict(d):
-    """从字典构建 Tenant（只读 mock）。"""
-    from src.domain.models import Tenant
-    return Tenant(
-        tenant_id=d["tenant_id"], api_key=d["api_key"],
-        name=d["name"], status=d["status"],
+def _project_from_dict(d):
+    """从字典构建 Project（只读 mock）。"""
+    from src.domain.project import Project
+    return Project(
+        project_id=d["project_id"], user_id=d.get("user_id", "test_user"),
+        api_key=d["api_key"], name=d["name"], status=d["status"],
     )
 
 
 class MockVectorStore:
-    def count(self, tenant_id=None):
+    def count(self, project_id=None):
         return 0
-    async def acount(self, tenant_id=None):
+    async def acount(self, project_id=None):
         return 0
 
 
@@ -279,29 +279,26 @@ class MockLLMClient:
 
 
 # ================================================================
-# TestClient Fixture（多租户适配）
+# TestClient Fixture（Project 适配）
 # ================================================================
 
 @pytest.fixture
 def client():
     """创建测试客户端，使用 Mock 组件。
 
-    多租户适配要点：
-      - 使用 app.state.retriever_factory 按租户获取 Retriever
-      - 注入 MockTenantService 供 resolve_tenant() 使用
-      - app.state.api_key 用于 _verify_admin_key()
-      - 所有业务接口请求需携带 X-API-Key: {TEST_API_KEY}
+    使用 MockProjectService 替代真实的 ProjectService，
+    所有业务接口请求需携带 X-API-Key: {TEST_API_KEY}
     """
     from src.utils.limiter import limiter
-    from src.api.routes import _get_tenant_service
+    from src.api.routes import _project_service
 
-    # 创建测试用的租户服务
-    test_tenant_svc = MockTenantService()
+    # 创建测试用的 project 服务
+    test_project_svc = MockProjectService()
 
-    # 覆盖 routes 中的 _get_tenant_service()，返回 mock 实例
+    # 覆盖 routes 中的 _project_service，返回 mock 实例
     import src.api.routes as routes_module
-    _original_get_tenant = routes_module._get_tenant_service
-    routes_module._get_tenant_service = lambda: test_tenant_svc
+    _original_project_service = routes_module._project_service
+    routes_module._project_service = test_project_svc
 
     # 创建 MockRetriever 和 Factory
     mock_retriever = MockRetriever()
@@ -316,15 +313,14 @@ def client():
     test_app.state.embedding_service = MockEmbeddingService()
     test_app.state.llm_client = MockLLMClient()
     test_app.state.limiter = limiter
-    test_app.state.api_key = TEST_API_KEY  # admin key
 
     test_app.include_router(router)
 
     with TestClient(test_app) as client:
         yield client
 
-    # 恢复原始函数
-    routes_module._get_tenant_service = _original_get_tenant
+    # 恢复原始实例
+    routes_module._project_service = _original_project_service
 
 
 # ================================================================
@@ -421,7 +417,7 @@ class TestChatEndpoint:
 # ================================================================
 
 class TestKnowledgeEndpoints:
-    """知识库端点测试 — 需 X-API-Key，tenant_id 透传。"""
+    """知识库端点测试 — 需 X-API-Key。"""
 
     def test_create_document(self, client):
         response = client.post(

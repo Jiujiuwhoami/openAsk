@@ -26,6 +26,8 @@ starlette.config.Config._read_file = _read_file_utf8
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 
+from src.utils.config import settings
+
 
 def _key_func(request):
     """优先读 X-Forwarded-For（代理/网关场景），降级到 socket IP。"""
@@ -36,4 +38,12 @@ def _key_func(request):
     return get_remote_address(request)
 
 
-limiter = Limiter(key_func=_key_func)
+# 支持 Redis 存储（多 Worker 共享限流状态）：
+#   memory://                    内存（默认，单进程）
+#   redis://redis-host:6379/0    Redis（生产环境，多进程共享）
+storage_uri = settings.rate_limit.storage_uri
+limiter = Limiter(
+    key_func=_key_func,
+    storage_uri=storage_uri if storage_uri and storage_uri != "memory://" else None,
+    in_memory_fallback_enabled=True,  # Redis 不可用时降级到内存
+)

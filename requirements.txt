@@ -40,6 +40,12 @@ pytest-cov>=4.0.0
 # 限流
 slowapi>=0.1.9
 
+# 认证（OAuth2 标准）
+passlib[bcrypt]>=1.7.4
+bcrypt>=4.0.0,<4.1
+PyJWT>=2.8.0
+email-validator>=2.2.0
+
 # LLM 响应缓存
 cachetools>=5.3.0
 redis>=5.0.0

@@ -1,7 +1,7 @@
 """LLM 客户端抽象接口。"""
 
 from abc import ABC, abstractmethod
-from typing import AsyncGenerator, Dict, List, Union
+from typing import AsyncGenerator, Dict, List, Optional, Union
 
 
 StreamChunk = Dict[str, Union[str, int]]
@@ -15,12 +15,22 @@ class LLMClient(ABC):
     """
 
     @abstractmethod
-    async def generate_answer(self, query: str, context: List[str]) -> str:
+    async def generate_answer(
+        self,
+        query: str,
+        context: List[str],
+        system_prompt: Optional[str] = None,
+        messages: Optional[List[dict]] = None,
+        language: str = "zh",
+    ) -> str:
         """根据查询和上下文生成回答。
 
         Args:
             query: 用户查询文本
             context: 检索到的上下文片段列表
+            system_prompt: 自定义系统 Prompt
+            messages: 多轮对话历史（OpenAI 格式 [{role, content}]）
+            language: 回答语言（zh/en）
 
         Returns:
             生成的回答文本
@@ -29,13 +39,21 @@ class LLMClient(ABC):
 
     @abstractmethod
     async def stream_answer(
-        self, query: str, context: List[str]
+        self,
+        query: str,
+        context: List[str],
+        system_prompt: Optional[str] = None,
+        messages: Optional[List[dict]] = None,
+        language: str = "zh",
     ) -> AsyncGenerator[StreamChunk, None]:
         """流式生成回答，逐 token 产出文本增量。
 
         Args:
             query: 用户查询文本
             context: 检索到的上下文片段列表
+            system_prompt: 自定义系统 Prompt
+            messages: 多轮对话历史（OpenAI 格式 [{role, content}]）
+            language: 回答语言（zh/en）
 
         Yields:
             StreamChunk: 包含 type 和 content 的字典。

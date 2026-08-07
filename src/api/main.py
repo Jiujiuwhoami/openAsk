@@ -1,17 +1,17 @@
 """FastAPI 应用入口。
 
 使用 lifespan 上下文管理器统一初始化共享组件，
-通过 RetrieverFactory 按需为每个租户创建隔离的 Retriever 实例。
+通过 RetrieverFactory 按需为每个项目创建隔离的 Retriever 实例。
 
-共享组件（一次启动，所有租户复用）：
+共享组件（一次启动，所有项目复用）：
   - EmbeddingService（SentenceBERT 模型）
-  - ZvecStore（共享向量数据库，按 tenant_id 过滤实现隔离）
+  - ZvecStore（共享向量数据库，按 project_id 过滤实现隔离）
   - Reranker（BGE 模型）
   - EmbeddingCache（内存缓存）
 
-租户隔离组件（按租户创建）：
-  - LLMClient（每个租户可配置不同的 API Key / Base / Model）
-  - LLMResponseCache（独立缓存目录，跨租户互不可见）
+项目隔离组件（按项目创建）：
+  - LLMClient（每个项目可配置不同的 API Key / Base / Model）
+  - LLMResponseCache（独立缓存目录，跨项目互不可见）
   - Retriever（组合上述组件）
 
 支持优雅关闭：
@@ -34,9 +34,17 @@ from slowapi.errors import RateLimitExceeded
 
 from src.core.factory import RetrieverFactory
 from src.utils.limiter import limiter
-from src.utils.dynamic_limiter import tenant_limiter
+from src.utils.dynamic_limiter import project_limiter
+from src.services.plan_service import PlanService
+from src.services.project_service import ProjectService
 
-from src.api.routes import router, admin_router
+from src.api.routes import router
+from src.api.auth import router as auth_router
+from src.api.projects import router as projects_router
+from src.api.billing import router as billing_router
+from src.api.analytics import router as analytics_router
+from src.api.ecommerce import router as ecommerce_router
+from src.api.conversations import router as conversations_router
 from src.api.schemas import ErrorResponse
 from src.domain.exceptions import (
     AppError,
@@ -125,14 +133,14 @@ async def lifespan(app: FastAPI):
 
     共享组件（全局单例）：
       - EmbeddingService（SentenceBERT 模型）
-      - ZvecStore（共享向量数据库，按 tenant_id filter 隔离）
+      - ZvecStore（共享向量数据库，按 project_id filter 隔离）
       - Reranker（BGE 模型）
       - EmbeddingCache（内存缓存）
       - KnowledgeService（文档 CRUD）
 
-    租户隔离组件（通过 RetrieverFactory 按需创建）：
-      - LLMClient（每个租户可配置独立 API Key / Base / Model）
-      - LLMResponseCache（独立缓存目录，跨租户互不可见）
+    项目隔离组件（通过 RetrieverFactory 按需创建）：
+      - LLMClient（每个项目可配置独立 API Key / Base / Model）
+      - LLMResponseCache（独立缓存目录，跨项目互不可见）
       - Retriever（组合上述组件）
     """
     logger.info("正在初始化应用组件...")
@@ -161,15 +169,12 @@ async def lifespan(app: FastAPI):
         reranker: Reranker = create_reranker()
         logger.info(f"Reranker 初始化完成 (启用: {reranker.is_enabled})")
 
-        from src.services.tenant_stats import TenantStatsRegistry
-
         retriever_factory = RetrieverFactory(
             embedding_service=embedding_service,
             vector_store=vector_store,
             default_llm_client=llm_client,
             reranker=reranker,
             embedding_cache=embedding_cache,
-            stats_registry=TenantStatsRegistry(),
         )
         logger.info("RetrieverFactory 初始化完成")
         app.state.stats_registry = retriever_factory._stats_registry
@@ -180,21 +185,11 @@ async def lifespan(app: FastAPI):
         )
         logger.info("KnowledgeService 初始化完成")
 
-        # 确保默认租户存在
-        from src.services.tenant_service import TenantService
-
-        tenant_svc = TenantService()
-        default_tenant = tenant_svc.ensure_default_tenant()
-        logger.info(
-            f"默认租户已确保存在: {default_tenant.tenant_id} ({default_tenant.name})"
-        )
-
         app.state.embedding_service = embedding_service
         app.state.vector_store = vector_store
         app.state.retriever_factory = retriever_factory
         app.state.reranker = reranker
         app.state.knowledge_service = knowledge_service
-        app.state.tenant_service = tenant_svc
 
         logger.info("所有组件初始化完成")
         yield
@@ -241,7 +236,7 @@ app = FastAPI(
 )
 
 app.state.limiter = limiter
-app.state.tenant_limiter = tenant_limiter
+app.state.project_limiter = project_limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 app.add_middleware(
@@ -257,23 +252,54 @@ app.add_middleware(
 async def dynamic_rate_limit_middleware(request: Request, call_next):
     """动态限流中间件：按租户 API Key 限流，支持运行时配置。
 
-    优先从 request.state.tenant 获取租户上下文（由 resolve_tenant 注入），
+    优先从 request.state.project 获取项目上下文，
     无租户时按 IP 限流。
     """
-    tenant = getattr(request.state, "tenant", None)
-    if tenant and not tenant_limiter.is_allowed(request, tenant):
+    project = getattr(request.state, "project", None)
+    if project and not project_limiter.is_allowed(request, project):
         return JSONResponse(
             status_code=429,
             content={
                 "error": "RateLimitExceeded",
-                "detail": f"Rate limit exceeded: {tenant.rate_limit_per_user}",
+                "detail": f"Rate limit exceeded: {project.rate_limit_per_user}",
                 "retry_after": 60,
             },
             headers={
-                "X-RateLimit-Limit": tenant.rate_limit_per_user,
-                "X-RateLimit-Remaining": str(tenant_limiter.get_remaining(request, tenant)),
+                "X-RateLimit-Limit": project.rate_limit_per_user,
+                "X-RateLimit-Remaining": str(project_limiter.get_remaining(request, project)),
             },
         )
+    return await call_next(request)
+
+
+@app.middleware("http")
+async def usage_limit_middleware(request: Request, call_next):
+    """用量限制中间件：检查业务 API 是否超出套餐限制。
+
+    仅对 /api/chat, /api/search, /api/search/batch 生效（知识库上传在路由层单独检查）。
+    """
+    if request.url.path in ("/api/chat", "/api/search", "/api/search/batch"):
+        project = getattr(request.state, "project", None)
+        if project:
+            plan_svc = PlanService()
+            project_svc = ProjectService()
+            vector_store = getattr(request.app.state, "vector_store", None)
+            doc_count = project_svc.get_document_count(project.project_id, vector_store)
+            check = plan_svc.check_limits(
+                project.project_id,
+                document_count=doc_count,
+            )
+            if not check["allowed"]:
+                return JSONResponse(
+                    status_code=402,
+                    content={
+                        "error": "UsageLimitExceeded",
+                        "detail": check["reason"],
+                        "plan": check["limits"]["name"],
+                        "usage": check["usage"],
+                    },
+                    headers={"X-Usage-Limit": check["reason"]},
+                )
     return await call_next(request)
 
 
@@ -298,8 +324,44 @@ async def request_count_middleware(request: Request, call_next):
     return response
 
 
+# ------------------------------------------------------------------
+# Sitemap（SEO — 站点地图）
+# ------------------------------------------------------------------
+
+from fastapi.responses import PlainTextResponse, HTMLResponse
+
+
+@app.get("/sitemap.xml", response_class=HTMLResponse, include_in_schema=False)
+async def sitemap():
+    """生成站点地图（帮助搜索引擎收录）。"""
+    base = settings.api.frontend_url or "http://localhost:5173"
+    today = "2026-08-07"
+    return HTMLResponse(
+        f"""<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url><loc>{base}/</loc><lastmod>{today}</lastmod><priority>1.0</priority></url>
+  <url><loc>{base}/login</loc><lastmod>{today}</lastmod><priority>0.6</priority></url>
+  <url><loc>{base}/register</loc><lastmod>{today}</lastmod><priority>0.6</priority></url>
+  <url><loc>{base}/forgot-password</loc><lastmod>{today}</lastmod><priority>0.3</priority></url>
+</urlset>"""
+    )
+
+
+@app.get("/robots.txt", response_class=PlainTextResponse, include_in_schema=False)
+async def robots():
+    """搜索引擎爬虫规则。"""
+    return PlainTextResponse(
+        "User-agent: *\nAllow: /\nSitemap: https://openask.dev/sitemap.xml\n"
+    )
+
+
+app.include_router(auth_router)
+app.include_router(projects_router)
+app.include_router(billing_router)
+app.include_router(analytics_router)
+app.include_router(conversations_router)
+app.include_router(ecommerce_router)
 app.include_router(router)
-app.include_router(admin_router)
 
 
 @app.exception_handler(AppError)

@@ -7,7 +7,7 @@
 
 共享组件（全局单例，由 main.py lifespan 注入）：
   - EmbeddingService（SentenceBERT 模型加载代价高，全局共享）
-  - ZvecStore（共享数据库，通过 tenant_id filter_expr 实现隔离）
+  - ZvecStore（共享数据库，通过 project_id filter_expr 实现隔离）
   - Reranker（BGE 模型加载代价高，全局共享）
   - EmbeddingCache（内存缓存，全局共享）
 """
@@ -17,8 +17,9 @@ import threading
 from typing import Optional
 
 from src.core.retriever import Retriever
-from src.domain.models import DEFAULT_TENANT_ID, Tenant
-from src.services.tenant_stats import TenantStatsRegistry
+from src.domain.models import DEFAULT_PROJECT_ID
+from src.domain.project import Project
+
 from src.infrastructure.interfaces.cache_backend import CacheBackend
 from src.infrastructure.interfaces.embedding_service import EmbeddingService
 from src.infrastructure.interfaces.llm_client import LLMClient
@@ -40,28 +41,28 @@ class RetrieverCache:
         self._maxsize = maxsize
         self._lock = threading.RLock()
 
-    def get(self, tenant_id: str) -> Optional[Retriever]:
+    def get(self, project_id: str) -> Optional[Retriever]:
         with self._lock:
-            return self._cache.get(tenant_id)
+            return self._cache.get(project_id)
 
-    def put(self, tenant_id: str, retriever: Retriever) -> None:
+    def put(self, project_id: str, retriever: Retriever) -> None:
         with self._lock:
-            if tenant_id not in self._cache and len(self._cache) >= self._maxsize:
+            if project_id not in self._cache and len(self._cache) >= self._maxsize:
                 oldest = next(iter(self._cache))
                 self._cache.pop(oldest)
                 logger.warning(
                     f"Retriever 缓存已达上限 {self._maxsize}，驱逐: {oldest}"
                 )
-            self._cache[tenant_id] = retriever
+            self._cache[project_id] = retriever
 
     async def close(self) -> None:
         with self._lock:
-            for tenant_id, retriever in list(self._cache.items()):
+            for project_id, retriever in list(self._cache.items()):
                 try:
                     await retriever.close()
-                    logger.info(f"Retriever 已关闭: tenant={tenant_id}")
+                    logger.info(f"Retriever 已关闭: project={project_id}")
                 except Exception as e:
-                    logger.warning(f"关闭 Retriever 失败: tenant={tenant_id} {e}")
+                    logger.warning(f"关闭 Retriever 失败: project={project_id} {e}")
             self._cache.clear()
 
     def __len__(self) -> int:
@@ -73,11 +74,11 @@ class RetrieverFactory:
 
     使用方式：
         factory = app.state.retriever_factory
-        retriever = factory.get_retriever_for_tenant(tenant_id, tenant)
-        result = await retriever.retrieve(query, tenant_id=tenant.tenant_id)
+        retriever = factory.get_retriever_for_project(project_id, project)
+        result = await retriever.retrieve(query, project_id=project.project_id)
 
     Args:
-        tenant: 租户对象，携带 LLM 配置（可选）。
+        project: 项目对象，携带 LLM 配置（可选）。
                 若提供且租户配置了独立 LLM API Key，使用该配置；
                 否则使用全局默认配置。
     """
@@ -90,7 +91,7 @@ class RetrieverFactory:
         embedding_cache=None,
         reranker: Optional[Reranker] = None,
         lru_maxsize: int = 128,
-        stats_registry: Optional[TenantStatsRegistry] = None,
+        stats_registry: Optional[dict] = None,
     ):
         self._embedding_service = embedding_service
         self._vector_store = vector_store
@@ -100,22 +101,22 @@ class RetrieverFactory:
         self._stats_registry = stats_registry
         self._cache = RetrieverCache(maxsize=lru_maxsize)
 
-    def get_retriever_for_tenant(
-        self, tenant_id: str, tenant: Optional[Tenant] = None
+    def get_retriever_for_project(
+        self, project_id: str, project: Optional[Project] = None
     ) -> Retriever:
         """获取/创建租户专属的 Retriever 实例。
 
-        缓存复用：同一 tenant_id 共享一个 Retriever 实例。
+        缓存复用：同一 project_id 共享一个 Retriever 实例。
         隔离：每个 Retriever 绑定独立的 LLM 响应缓存。
-        LLM 配置：若 tenant 配置了独立 LLM API Key，使用该配置；
+        LLM 配置：若项目配置了独立 LLM API Key，使用该配置；
                   否则使用全局默认配置。
         """
-        existing = self._cache.get(tenant_id)
+        existing = self._cache.get(project_id)
         if existing is not None:
             return existing
 
-        cache_backend = self._create_cache_for_tenant(tenant_id)
-        llm_client = self._create_llm_client_for_tenant(tenant_id, tenant)
+        cache_backend = self._create_cache_for_project(project_id)
+        llm_client = self._create_llm_client_for_project(project_id, project)
 
         retriever = Retriever(
             embedding_service=self._embedding_service,
@@ -127,8 +128,8 @@ class RetrieverFactory:
             stats_registry=self._stats_registry,
         )
 
-        self._cache.put(tenant_id, retriever)
-        logger.info(f"Retriever 实例已创建: tenant={tenant_id}")
+        self._cache.put(project_id, retriever)
+        logger.info(f"Retriever 实例已创建: project={project_id}")
         return retriever
 
     def close(self) -> None:
@@ -140,42 +141,42 @@ class RetrieverFactory:
     # 内部工厂方法
     # ------------------------------------------------------------------
 
-    def _create_cache_for_tenant(self, tenant_id: str) -> LLMResponseCache:
+    def _create_cache_for_project(self, project_id: str) -> LLMResponseCache:
         """为租户创建隔离的 LLM 响应缓存。"""
-        if tenant_id == DEFAULT_TENANT_ID:
+        if project_id == DEFAULT_PROJECT_ID:
             return LLMResponseCache()
 
         cache_base = settings.zvec.cache_path or "data/zvec_llm_cache"
-        cache_path = os.path.join(cache_base, tenant_id)
+        cache_path = os.path.join(cache_base, project_id)
         cache = LLMResponseCache(cache_path=cache_path)
         logger.info(
-            f"LLM 缓存实例已创建: tenant={tenant_id} path={cache_path}"
+            f"LLM 缓存实例已创建: project={project_id} path={cache_path}"
         )
         return cache
 
-    def _create_llm_client_for_tenant(
-        self, tenant_id: str, tenant: Optional[Tenant] = None
+    def _create_llm_client_for_project(
+        self, project_id: str, project: Optional[Project] = None
     ) -> LLMClient:
         """为租户创建 LLM 客户端。
 
         优先使用租户自定义配置（API Key / Base / Model），
         降级使用全局默认配置。
         """
-        if tenant_id == DEFAULT_TENANT_ID:
+        if project_id == DEFAULT_PROJECT_ID:
             return self._default_llm_client
 
-        if tenant is not None and tenant.llm_api_key:
+        if project is not None and project.llm_api_key:
             logger.info(
-                f"租户 {tenant_id} 使用自定义 LLM 配置 "
-                f"(base={tenant.llm_api_base[:30] if tenant.llm_api_base else 'default'}, "
-                f"model={tenant.llm_model or 'default'})"
+                f"项目 {project_id} 使用自定义 LLM 配置 "
+                f"(base={project.llm_api_base[:30] if project.llm_api_base else 'default'}, "
+                f"model={project.llm_model or 'default'})"
             )
             return SenseNovaClient(
-                api_key=tenant.llm_api_key,
-                api_base=tenant.llm_api_base or None,
-                model=tenant.llm_model or None,
-                timeout=tenant.llm_timeout or settings.llm.timeout,
+                api_key=project.llm_api_key,
+                api_base=project.llm_api_base or None,
+                model=project.llm_model or None,
+                timeout=project.llm_timeout or settings.llm.timeout,
             )
 
-        logger.info(f"租户 {tenant_id} 使用全局默认 LLM 配置")
+        logger.info(f"项目 {project_id} 使用全局默认 LLM 配置")
         return self._default_llm_client
