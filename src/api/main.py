@@ -205,7 +205,7 @@ async def lifespan(app: FastAPI):
 
         if hasattr(app.state, "retriever_factory"):
             try:
-                app.state.retriever_factory.close()
+                await app.state.retriever_factory.close()
                 logger.info("RetrieverFactory 已关闭")
             except Exception as e:
                 logger.error(f"关闭 RetrieverFactory 失败: {e}")

@@ -132,9 +132,9 @@ class RetrieverFactory:
         logger.info(f"Retriever 实例已创建: project={project_id}")
         return retriever
 
-    def close(self) -> None:
+    async def close(self) -> None:
         """关闭所有租户 Retriever 实例（共享组件由 main.py 统一关闭）。"""
-        self._cache.close()
+        await self._cache.close()
         logger.info("RetrieverFactory 已关闭")
 
     # ------------------------------------------------------------------

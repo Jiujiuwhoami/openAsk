@@ -148,16 +148,15 @@ class TestRetrieverFactory:
         r = factory.get_retriever_for_project("proj_no_project", None)
         assert r is not None
 
-    def test_close(self, factory):
+    @pytest.mark.asyncio
+    async def test_close(self, factory):
         factory.get_retriever_for_project("proj_1")
         factory.get_retriever_for_project("proj_2")
 
-        # factory.close() 是同步方法，内部调用 _cache.close() 但不 await
-        # 直接测试 _cache.close() 的行为
         factory._cache = Mock()
-        factory._cache.close = Mock()
-        factory.close()
-        factory._cache.close.assert_called_once()
+        factory._cache.close = AsyncMock()
+        await factory.close()
+        factory._cache.close.assert_awaited_once()
 
 
 class TestCreateCacheForProject:
