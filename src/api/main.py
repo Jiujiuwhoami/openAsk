@@ -368,10 +368,11 @@ app.include_router(router)
 async def app_error_handler(request: Request, exc: AppError):
     """全局应用异常处理器。"""
     status_code = 500
-    if isinstance(exc, (KnowledgeBaseError, MultiModalError)):
-        status_code = 400
-    elif isinstance(exc, DocumentNotFoundError):
+    # 注意：DocumentNotFoundError 继承自 KnowledgeBaseError，必须先判断
+    if isinstance(exc, DocumentNotFoundError):
         status_code = 404
+    elif isinstance(exc, (KnowledgeBaseError, MultiModalError)):
+        status_code = 400
     elif isinstance(exc, (EmbeddingError, VectorStoreError, SenseNovaAPIError)):
         status_code = 503
 
