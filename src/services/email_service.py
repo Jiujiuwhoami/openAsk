@@ -8,8 +8,9 @@ import logging
 from typing import Optional
 
 from src.utils.config import settings
+from src.utils.logger import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 def send_email(

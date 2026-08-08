@@ -13,7 +13,7 @@ import tempfile
 from datetime import datetime
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, Request
 
 from fastapi.responses import StreamingResponse
 
@@ -694,15 +694,23 @@ async def batch_search(
 async def list_documents(
     page: int = 1,
     page_size: int = 10,
+    search: str = Query("", description="按标题/内容/标签搜索"),
+    tag: str = Query("", description="按标签筛选"),
     knowledge_service=Depends(get_knowledge_service),
     project=Depends(resolve_project),
 ):
-    """列出文档接口（分页）。"""
+    """列出文档接口（分页），支持搜索和标签筛选。"""
     try:
-        docs = await knowledge_service.list_documents(
-            page=page, page_size=page_size, project_id=project.project_id
-        )
-        total = await knowledge_service.count_documents(project_id=project.project_id)
+        if search.strip() or tag.strip():
+            docs, total = await knowledge_service.list_documents_filtered(
+                page=page, page_size=page_size, project_id=project.project_id,
+                search=search, tag=tag,
+            )
+        else:
+            docs = await knowledge_service.list_documents(
+                page=page, page_size=page_size, project_id=project.project_id
+            )
+            total = await knowledge_service.count_documents(project_id=project.project_id)
         items = [
             DocumentResponse(
                 doc_id=d.doc_id,

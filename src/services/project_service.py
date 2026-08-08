@@ -385,3 +385,122 @@ class ProjectService:
             except Exception:
                 pass
         return 0
+
+    # ---- 管理后台：全局聚合 ----
+
+    def list_all(
+        self,
+        page: int = 1,
+        page_size: int = 20,
+        search: str = "",
+    ) -> dict:
+        """分页查询所有项目（管理后台用）。
+
+        Returns:
+            {"items": [...], "total": ..., "page": ..., "page_size": ...}
+        """
+        conditions = ["1=1"]
+        params: list = []
+        if search:
+            conditions.append("(name LIKE ? OR project_id LIKE ?)")
+            params.extend([f"%{search}%", f"%{search}%"])
+
+        where = " AND ".join(conditions)
+        offset = (page - 1) * page_size
+
+        conn = self._get_connection()
+        try:
+            count_row = conn.execute(
+                f"SELECT COUNT(*) as cnt FROM projects WHERE {where}", params
+            ).fetchone()
+            total = count_row["cnt"] if count_row else 0
+
+            rows = conn.execute(
+                f"""SELECT p.*, s.total_calls, s.prompt_tokens, s.completion_tokens, s.cache_hits, s.last_call_at
+                    FROM projects p
+                    LEFT JOIN project_stats s ON s.project_id = p.project_id
+                    WHERE {where}
+                    ORDER BY p.created_at DESC
+                    LIMIT ? OFFSET ?""",
+                params + [page_size, offset],
+            ).fetchall()
+
+            items = []
+            for r in rows:
+                d = dict(r)
+                items.append({
+                    "project_id": d["project_id"],
+                    "user_id": d["user_id"],
+                    "name": d["name"],
+                    "status": d["status"],
+                    "llm_model": d.get("llm_model", ""),
+                    "language": d.get("language", "zh"),
+                    "created_at": d["created_at"],
+                    "updated_at": d["updated_at"],
+                    "total_calls": d.get("total_calls", 0),
+                    "prompt_tokens": d.get("prompt_tokens", 0),
+                    "completion_tokens": d.get("completion_tokens", 0),
+                    "cache_hits": d.get("cache_hits", 0),
+                    "last_call_at": d.get("last_call_at", 0),
+                })
+            return {"items": items, "total": total, "page": page, "page_size": page_size}
+        finally:
+            conn.close()
+
+    def count_projects(self) -> int:
+        """项目总数（含软删除标记的）。"""
+        conn = self._get_connection()
+        try:
+            row = conn.execute("SELECT COUNT(*) as cnt FROM projects").fetchone()
+            return row["cnt"] if row else 0
+        finally:
+            conn.close()
+
+    def count_projects_by_user(self, user_id: str) -> int:
+        """某个用户的项目数（管理后台用）。"""
+        conn = self._get_connection()
+        try:
+            row = conn.execute(
+                "SELECT COUNT(*) as cnt FROM projects WHERE user_id = ?", (user_id,)
+            ).fetchone()
+            return row["cnt"] if row else 0
+        finally:
+            conn.close()
+
+    def count_projects_today(self) -> int:
+        """今日创建项目数。"""
+        start = int(datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0).timestamp())
+        conn = self._get_connection()
+        try:
+            row = conn.execute(
+                "SELECT COUNT(*) as cnt FROM projects WHERE created_at >= ?", (start,)
+            ).fetchone()
+            return row["cnt"] if row else 0
+        finally:
+            conn.close()
+
+    def get_all_stats(self) -> dict:
+        """所有项目聚合统计。"""
+        conn = self._get_connection()
+        try:
+            row = conn.execute(
+                """SELECT
+                    COALESCE(SUM(total_calls), 0) as total_calls,
+                    COALESCE(SUM(prompt_tokens), 0) as prompt_tokens,
+                    COALESCE(SUM(completion_tokens), 0) as completion_tokens,
+                    COALESCE(SUM(cache_hits), 0) as cache_hits,
+                    MAX(last_call_at) as last_call_at
+                   FROM project_stats"""
+            ).fetchone()
+            total = row["total_calls"] or 0
+            hits = row["cache_hits"] or 0
+            return {
+                "total_calls": total,
+                "prompt_tokens": row["prompt_tokens"] or 0,
+                "completion_tokens": row["completion_tokens"] or 0,
+                "cache_hits": hits,
+                "cache_hit_rate": round(hits / total, 4) if total > 0 else 0.0,
+                "last_call_at": row["last_call_at"] or 0,
+            }
+        finally:
+            conn.close()

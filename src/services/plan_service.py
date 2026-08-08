@@ -393,3 +393,14 @@ class PlanService:
             return row["project_id"] if row else None
         finally:
             conn.close()
+
+    def count_active_subscriptions(self) -> int:
+        """统计非 free 套餐的项目数（活跃订阅数）。"""
+        conn = self._get_connection()
+        try:
+            row = conn.execute(
+                "SELECT COUNT(*) as cnt FROM project_plans WHERE plan != 'free'"
+            ).fetchone()
+            return row["cnt"] if row else 0
+        finally:
+            conn.close()

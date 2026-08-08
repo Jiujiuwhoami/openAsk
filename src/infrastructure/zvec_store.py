@@ -4,7 +4,8 @@ import asyncio
 import os
 import shutil
 import threading
-from typing import List, Optional
+from collections import defaultdict
+from typing import Dict, List, Optional, Set
 
 import numpy as np
 import zvec
@@ -33,6 +34,9 @@ class ZvecStore(VectorStore):
         self._dimension = dimension or settings.zvec.dimension
         self._lock = threading.RLock()
         self._collection: Optional[zvec.Collection] = None
+        # 内容哈希映射：{project_id: {content_hash: doc_id}}
+        # 用于内容去重检查，在服务重启后重建（通过扫描现有文档）
+        self._content_hashes: Dict[str, Dict[str, str]] = defaultdict(dict)
         with self._lock:
             self._init_collection()
 
@@ -153,6 +157,7 @@ class ZvecStore(VectorStore):
                             "created_at": document.created_at,
                             "updated_at": document.updated_at,
                             "source": document.source or "",
+                            
                             "project_id": "default",
                         },
                     )
@@ -276,7 +281,7 @@ class ZvecStore(VectorStore):
             return f"({tid_filter}) AND ({extra_filter})"
         return tid_filter
 
-    def insert(self, doc: Document, dense_vector: np.ndarray, project_id: str = DEFAULT_PROJECT_ID) -> None:
+    def insert(self, doc: Document, dense_vector: np.ndarray, project_id: str = DEFAULT_PROJECT_ID, content_hash: Optional[str] = None) -> None:
         """插入文档到向量库（同步）。"""
         try:
             with self._lock:
@@ -294,22 +299,27 @@ class ZvecStore(VectorStore):
                             "created_at": doc.created_at,
                             "updated_at": doc.updated_at,
                             "source": doc.source or "",
+                            
                             "project_id": doc.project_id or project_id,
                         },
                     )
                 )
+                # 记录内容哈希（内存去重）
+                pid = doc.project_id or project_id
+                if content_hash:
+                    self._content_hashes[pid][content_hash] = doc.doc_id
             logger.debug(f"文档已插入: {doc.doc_id} (project={doc.project_id or project_id})")
         except Exception as e:
             logger.error(f"插入文档失败: {doc.doc_id} | {e}", exc_info=True)
             raise VectorStoreError(f"Failed to insert document: {e}")
 
     async def ainsert(
-        self, doc: Document, dense_vector: np.ndarray, project_id: str = DEFAULT_PROJECT_ID
+        self, doc: Document, dense_vector: np.ndarray, project_id: str = DEFAULT_PROJECT_ID, content_hash: Optional[str] = None
     ) -> None:
         """插入文档到向量库（异步）。"""
-        await asyncio.to_thread(self.insert, doc, dense_vector, project_id)
+        await asyncio.to_thread(self.insert, doc, dense_vector, project_id, content_hash)
 
-    def upsert(self, doc: Document, dense_vector: np.ndarray, project_id: str = DEFAULT_PROJECT_ID) -> None:
+    def upsert(self, doc: Document, dense_vector: np.ndarray, project_id: str = DEFAULT_PROJECT_ID, content_hash: Optional[str] = None) -> None:
         """更新或插入文档到向量库（同步）。"""
         try:
             with self._lock:
@@ -327,20 +337,25 @@ class ZvecStore(VectorStore):
                             "created_at": doc.created_at,
                             "updated_at": doc.updated_at,
                             "source": doc.source or "",
+                            
                             "project_id": doc.project_id or project_id,
                         },
                     )
                 )
+                # 记录内容哈希（内存去重）
+                pid = doc.project_id or project_id
+                if content_hash:
+                    self._content_hashes[pid][content_hash] = doc.doc_id
             logger.debug(f"文档已 upsert: {doc.doc_id} (project={doc.project_id or project_id})")
         except Exception as e:
             logger.error(f"Upsert 文档失败: {doc.doc_id} | {e}", exc_info=True)
             raise VectorStoreError(f"Failed to upsert document: {e}")
 
     async def aupsert(
-        self, doc: Document, dense_vector: np.ndarray, project_id: str = DEFAULT_PROJECT_ID
+        self, doc: Document, dense_vector: np.ndarray, project_id: str = DEFAULT_PROJECT_ID, content_hash: Optional[str] = None
     ) -> None:
         """更新或插入文档到向量库（异步）。"""
-        await asyncio.to_thread(self.upsert, doc, dense_vector, project_id)
+        await asyncio.to_thread(self.upsert, doc, dense_vector, project_id, content_hash)
 
     def delete(self, doc_id: str, project_id: str = DEFAULT_PROJECT_ID) -> bool:
         """删除指定文档（同步）。先按 project_id 验证归属。"""
@@ -353,6 +368,13 @@ class ZvecStore(VectorStore):
                     logger.warning(f"文档不存在或不属于当前项目: {doc_id} (project={project_id})")
                     return False
                 self._collection.delete(ids=[doc_id])
+                # 清理内存哈希映射
+                pid = existing.project_id or project_id
+                pid_map = self._content_hashes.get(pid)
+                if pid_map:
+                    removed = [h for h, d in pid_map.items() if d == doc_id]
+                    for h in removed:
+                        del pid_map[h]
             logger.debug(f"文档已删除: {doc_id} (project={project_id})")
             return True
         except Exception as e:
@@ -374,6 +396,8 @@ class ZvecStore(VectorStore):
                 else:
                     # 默认项目：全量删除
                     count = self._collection.delete_by_filter(filter=None)
+                # 清理该项目的内存哈希映射
+                self._content_hashes.pop(project_id, None)
             logger.info(f"批量删除项目文档完成: project={project_id} deleted={count}")
             return count
         except Exception as e:
@@ -428,6 +452,36 @@ class ZvecStore(VectorStore):
         except Exception as e:
             logger.error(f"向量检索失败: {e}", exc_info=True)
             raise VectorStoreError(f"Failed to search: {e}")
+
+    def search_by_hash(
+        self,
+        content_hash: str,
+        project_id: str = DEFAULT_PROJECT_ID,
+    ) -> Optional[Document]:
+        """按内容哈希精确查找文档（同步）。
+
+        用于内容去重检查。哈希映射在 insert/upsert 时维护在内存中，
+        服务重启后重建（扫描现有文档自动计算内容哈希）。
+        返回匹配的文档，不存在返回 None。
+        """
+        try:
+            with self._lock:
+                self._ensure_collection()
+                doc_id = self._content_hashes.get(project_id, {}).get(content_hash)
+                if not doc_id:
+                    return None
+                return self.get(doc_id, project_id)
+        except Exception as e:
+            logger.error(f"按哈希查找文档失败: {content_hash} | {e}", exc_info=True)
+            raise VectorStoreError(f"Failed to search by hash: {e}")
+
+    async def asearch_by_hash(
+        self,
+        content_hash: str,
+        project_id: str = DEFAULT_PROJECT_ID,
+    ) -> Optional[Document]:
+        """按内容哈希精确查找文档（异步）。"""
+        return await asyncio.to_thread(self.search_by_hash, content_hash, project_id)
 
     async def asearch(
         self,

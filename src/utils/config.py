@@ -161,6 +161,7 @@ class AuthSettings(BaseSettings):
     secret_key: str = "change-me-in-production"
     algorithm: str = "HS256"
     access_token_expire_minutes: int = 1440  # 24 hours
+    admin_emails: str = ""  # 逗号分隔的管理员邮箱白名单
 
 
 class StripeSettings(BaseSettings):

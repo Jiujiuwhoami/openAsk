@@ -300,6 +300,45 @@ class KnowledgeService:
             page=page, page_size=page_size, project_id=project_id
         )
 
+    async def list_documents_filtered(
+        self,
+        page: int = 1,
+        page_size: int = 10,
+        project_id: str = DEFAULT_PROJECT_ID,
+        search: Optional[str] = None,
+        tag: Optional[str] = None,
+    ) -> tuple:
+        """带搜索/标签过滤的分页列表（异步）。
+
+        仅在传了 search 或 tag 时使用：全量加载项目文档后按
+        标题/内容/标签做关键词过滤，再排序分页。
+
+        Args:
+            search: 按标题/内容/标签模糊匹配（不区分大小写）
+            tag: 按标签精确筛选
+
+        Returns:
+            (docs, total): 当前页文档列表与过滤后的总数
+        """
+        all_docs = await self._vector_store.alist(project_id=project_id)
+
+        if search and search.strip():
+            q = search.strip().lower()
+            all_docs = [
+                d for d in all_docs
+                if q in d.title.lower()
+                or q in d.content.lower()
+                or any(q in (t or "").lower() for t in d.tags)
+            ]
+
+        if tag and tag.strip():
+            all_docs = [d for d in all_docs if tag in (d.tags or [])]
+
+        all_docs.sort(key=lambda x: x.created_at, reverse=True)
+        total = len(all_docs)
+        start = (page - 1) * page_size
+        return all_docs[start:start + page_size], total
+
     async def search(
         self, query: str, top_k: int = 5, project_id: str = DEFAULT_PROJECT_ID
     ) -> List[SearchResult]:

@@ -38,6 +38,7 @@ CREATE TABLE IF NOT EXISTS users (
     name TEXT DEFAULT '',
     is_verified INTEGER DEFAULT 0,
     is_active INTEGER DEFAULT 1,
+    is_admin INTEGER DEFAULT 0,
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL
 );
@@ -47,16 +48,24 @@ CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
 
 def _user_from_row(row: dict) -> User:
     """从 SQLite 行记录构建 User 实例。"""
+    r = dict(row)
     return User(
-        user_id=row["user_id"],
-        email=row["email"],
-        password_hash=row["password_hash"],
-        name=row["name"],
-        is_verified=bool(row["is_verified"]),
-        is_active=bool(row["is_active"]),
-        created_at=row["created_at"],
-        updated_at=row["updated_at"],
+        user_id=r["user_id"],
+        email=r["email"],
+        password_hash=r["password_hash"],
+        name=r.get("name", ""),
+        is_verified=bool(r.get("is_verified", 0)),
+        is_active=bool(r.get("is_active", 1)),
+        is_admin=bool(r.get("is_admin", 0)),
+        created_at=r["created_at"],
+        updated_at=r["updated_at"],
     )
+
+
+def _admin_emails() -> set:
+    """从配置读取管理员邮箱白名单（逗号分隔）。"""
+    raw = settings.auth.admin_emails or ""
+    return {e.strip().lower() for e in raw.split(",") if e.strip()}
 
 
 class UserService:
@@ -76,10 +85,25 @@ class UserService:
             conn = self._get_connection()
             try:
                 conn.executescript(_INIT_SQL)
+                self._migrate(conn)
                 conn.commit()
             finally:
                 conn.close()
             logger.info(f"用户数据库已初始化: {self._db_path}")
+
+    def _migrate(self, conn: sqlite3.Connection) -> None:
+        """旧库迁移：补加新增列（幂等）。"""
+        columns = {r["name"] for r in conn.execute("PRAGMA table_info(users)").fetchall()}
+        if "is_admin" not in columns:
+            conn.execute("ALTER TABLE users ADD COLUMN is_admin INTEGER DEFAULT 0")
+            logger.info("用户表迁移：新增 is_admin 列")
+        # 将配置中的管理员邮箱提升为管理员
+        admins = _admin_emails()
+        for email in admins:
+            conn.execute(
+                "UPDATE users SET is_admin = 1 WHERE email = ? AND is_admin = 0",
+                (email,),
+            )
 
     def _get_connection(self) -> sqlite3.Connection:
         """获取数据库连接。"""
@@ -151,14 +175,15 @@ class UserService:
         user_id = f"user_{secrets.token_hex(8)}"
         password_hash = self.hash_password(password)
         now = int(datetime.utcnow().timestamp())
+        is_admin = int(email.lower() in _admin_emails())
 
         with self._lock:
             conn = self._get_connection()
             try:
                 conn.execute(
-                    """INSERT INTO users (user_id, email, password_hash, name, is_verified, is_active, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, 0, 1, ?, ?)""",
-                    (user_id, email, password_hash, name, now, now),
+                    """INSERT INTO users (user_id, email, password_hash, name, is_verified, is_active, is_admin, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, 0, 1, ?, ?, ?)""",
+                    (user_id, email, password_hash, name, is_admin, now, now),
                 )
                 conn.commit()
             except sqlite3.IntegrityError:
@@ -213,6 +238,102 @@ class UserService:
             return _user_from_row(row) if row else None
         finally:
             conn.close()
+
+    def list_all(
+        self,
+        page: int = 1,
+        page_size: int = 20,
+        search: str = "",
+    ) -> dict:
+        """分页查询所有用户（管理后台用）。
+
+        Returns:
+            {"items": [...], "total": ..., "page": ..., "page_size": ...}
+        """
+        conditions = ["1=1"]
+        params: list = []
+        if search:
+            conditions.append("(email LIKE ? OR name LIKE ?)")
+            params.extend([f"%{search}%", f"%{search}%"])
+
+        where = " AND ".join(conditions)
+        offset = (page - 1) * page_size
+
+        conn = self._get_connection()
+        try:
+            count_row = conn.execute(
+                f"SELECT COUNT(*) as cnt FROM users WHERE {where}", params
+            ).fetchone()
+            total = count_row["cnt"] if count_row else 0
+
+            rows = conn.execute(
+                f"SELECT * FROM users WHERE {where} ORDER BY created_at DESC LIMIT ? OFFSET ?",
+                params + [page_size, offset],
+            ).fetchall()
+
+            items = []
+            for r in rows:
+                u = _user_from_row(r)
+                project_count = 0
+                try:
+                    from src.services.project_service import ProjectService
+                    ps = ProjectService()
+                    project_count = ps.count_projects_by_user(u.user_id)
+                except Exception:
+                    pass
+                items.append({
+                    "user_id": u.user_id,
+                    "email": u.email,
+                    "name": u.name,
+                    "is_verified": u.is_verified,
+                    "is_active": u.is_active,
+                    "is_admin": u.is_admin,
+                    "project_count": project_count,
+                    "created_at": u.created_at,
+                })
+            return {"items": items, "total": total, "page": page, "page_size": page_size}
+        finally:
+            conn.close()
+
+    def count_users(self) -> int:
+        """用户总数。"""
+        conn = self._get_connection()
+        try:
+            row = conn.execute("SELECT COUNT(*) as cnt FROM users").fetchone()
+            return row["cnt"] if row else 0
+        finally:
+            conn.close()
+
+    def count_users_today(self) -> int:
+        """今日注册用户数。"""
+        start = int(datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0).timestamp())
+        conn = self._get_connection()
+        try:
+            row = conn.execute(
+                "SELECT COUNT(*) as cnt FROM users WHERE created_at >= ?", (start,)
+            ).fetchone()
+            return row["cnt"] if row else 0
+        finally:
+            conn.close()
+
+    def set_admin(self, user_id: str, is_admin: bool) -> User:
+        """设置用户管理员权限。"""
+        user = self.get_by_id(user_id)
+        if not user:
+            raise UserNotFoundError(f"用户不存在: {user_id}")
+        now = int(datetime.utcnow().timestamp())
+        with self._lock:
+            conn = self._get_connection()
+            try:
+                conn.execute(
+                    "UPDATE users SET is_admin = ?, updated_at = ? WHERE user_id = ?",
+                    (int(is_admin), now, user_id),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+        logger.info(f"管理员权限已更新: {user_id} → {is_admin}")
+        return self.get_by_id(user_id)
 
     def verify_email(self, user_id: str) -> User:
         """标记邮箱为已验证。"""

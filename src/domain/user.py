@@ -15,6 +15,7 @@ class User:
         name: str = "",
         is_verified: bool = False,
         is_active: bool = True,
+        is_admin: bool = False,
         created_at: Optional[int] = None,
         updated_at: Optional[int] = None,
     ):
@@ -24,6 +25,7 @@ class User:
         self._name = name
         self._is_verified = is_verified
         self._is_active = is_active
+        self._is_admin = is_admin
         now = int(time.time())
         self._created_at = created_at if created_at is not None else now
         self._updated_at = updated_at if updated_at is not None else now
@@ -51,6 +53,10 @@ class User:
     @property
     def is_active(self) -> bool:
         return self._is_active
+
+    @property
+    def is_admin(self) -> bool:
+        return self._is_admin
 
     @property
     def created_at(self) -> int:

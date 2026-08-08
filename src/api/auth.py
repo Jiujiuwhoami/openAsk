@@ -40,6 +40,7 @@ from src.services.email_service import (
     build_password_reset_email,
 )
 from src.utils.config import settings
+from src.utils.limiter import limiter
 
 router = APIRouter(prefix="/api/auth")
 
@@ -68,6 +69,7 @@ class UserResponse(BaseModel):
     email: str
     name: str
     is_verified: bool
+    is_admin: bool = False
     created_at: int
 
 
@@ -92,6 +94,7 @@ class MeResponse(BaseModel):
     email: str
     name: str
     is_verified: bool
+    is_admin: bool = False
     created_at: int
 
 
@@ -157,6 +160,7 @@ async def register(body: RegisterRequest):
             email=user.email,
             name=user.name,
             is_verified=user.is_verified,
+            is_admin=user.is_admin,
             created_at=user.created_at,
         ),
         project={
@@ -168,7 +172,8 @@ async def register(body: RegisterRequest):
 
 
 @router.post("/token", response_model=TokenResponse)
-async def login(form_data: OAuth2PasswordRequestForm = Depends()):
+@limiter.limit("10/minute")
+async def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends()):
     """OAuth2 标准 Token 端点。
 
     请求:
@@ -206,6 +211,7 @@ async def login(form_data: OAuth2PasswordRequestForm = Depends()):
             email=user.email,
             name=user.name,
             is_verified=user.is_verified,
+            is_admin=user.is_admin,
             created_at=user.created_at,
         ),
     )
@@ -231,6 +237,7 @@ async def get_me(current_user: User = Depends(get_current_user)):
         email=current_user.email,
         name=current_user.name,
         is_verified=current_user.is_verified,
+        is_admin=current_user.is_admin,
         created_at=current_user.created_at,
     )
 

@@ -23,6 +23,8 @@ services:
       - API_HOST=0.0.0.0
       # Redis 用于多 Worker 共享限流状态
       - RATE_LIMIT_STORAGE_URI=redis://redis:6379/0
+      # 模型已缓存，禁止联网检查（容器无网络）
+      - HF_HUB_OFFLINE=1
     volumes:
       # 数据持久化（挂载父目录，zvec 自己创建子目录）
       - ./data:/app/data

@@ -348,6 +348,7 @@ class Retriever:
         if not search_results:
             logger.debug("未检索到相关文档")
             yield {"event": "sources", "data": []}
+            yield {"event": "cache_hit", "data": False}
             yield {"event": "handoff_suggested", "data": True}
             yield {"event": "answer_delta", "data": "未找到相关信息"}
             yield {"event": "done", "data": None}

@@ -3,12 +3,17 @@
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
 
 
 @pytest.fixture
 def app():
     from src.api.auth import router
+    from src.utils.limiter import limiter
     app = FastAPI()
+    app.state.limiter = limiter
+    app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
     app.include_router(router)
     return app
 
