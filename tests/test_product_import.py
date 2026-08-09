@@ -248,6 +248,70 @@ class TestFAQTemplateService:
         assert result["failed"] == 0
         assert len(result["errors"]) == 1
 
+    def test_list_templates_with_applied_status(self, template_service):
+        """list_templates 传入 project_id 时返回 applied 状态。"""
+        from src.services.project_service import ProjectService
+
+        # 创建一个项目
+        project_service = ProjectService()
+        project = project_service.create_project(
+            user_id="test_user",
+            name="模板测试项目",
+        )
+
+        # 标记模板已应用
+        project.mark_template_applied("return_policy")
+        project_service.update_project(
+            project.project_id,
+            applied_templates=project.applied_templates,
+        )
+
+        # 获取模板列表（含 applied 状态）
+        templates = template_service.list_templates(project_id=project.project_id)
+        for t in templates:
+            assert "applied" in t, f"模板 {t['id']} 缺少 applied 字段"
+        applied = [t for t in templates if t["applied"]]
+        not_applied = [t for t in templates if not t["applied"]]
+        assert len(applied) >= 1
+        assert applied[0]["id"] == "return_policy"
+        assert len(not_applied) >= 1
+
+    @pytest.mark.asyncio
+    async def test_apply_template_already_applied(self, template_service):
+        """已应用的模板再次应用返回 already_applied。"""
+        from src.services.project_service import ProjectService
+
+        # 创建项目
+        project_service = ProjectService()
+        project = project_service.create_project(
+            user_id="test_user",
+            name="防重复测试项目",
+        )
+
+        mock_knowledge = Mock()
+        async def fake_create(*args, **kwargs):
+            return "doc_1"
+        mock_knowledge.create_document_from_text = fake_create
+
+        # 第一次应用
+        result1 = await template_service.apply_template(
+            "return_policy",
+            knowledge_service=mock_knowledge,
+            project_id=project.project_id,
+        )
+        assert result1["success"] >= 2
+        assert result1["failed"] == 0
+
+        # 第二次应用（应拒绝）
+        result2 = await template_service.apply_template(
+            "return_policy",
+            knowledge_service=mock_knowledge,
+            project_id=project.project_id,
+        )
+        assert result2["already_applied"] is True
+        assert result2["success"] == 0
+        assert result2["failed"] == 0
+
 
 # ================================================================
 # FAQ_TEMPLATES 数据完整性

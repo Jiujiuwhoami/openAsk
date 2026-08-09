@@ -3,6 +3,7 @@
 每个项目（Project）是一个独立的知识库空间，拥有独立的 API Key 和 LLM 配置。
 """
 
+import json
 import os
 import secrets
 import sqlite3
@@ -31,6 +32,7 @@ CREATE TABLE IF NOT EXISTS projects (
     rate_limit_global TEXT DEFAULT '1000/minute',
     system_prompt TEXT DEFAULT '',
     language TEXT DEFAULT 'zh',
+    applied_templates TEXT DEFAULT '[]',
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL
 );
@@ -52,6 +54,12 @@ CREATE TABLE IF NOT EXISTS project_stats (
 def _project_from_row(row: dict) -> Project:
     """从 SQLite 行记录构建 Project 实例。"""
     r = dict(row)  # sqlite3.Row → dict（支持 .get()）
+    # 兼容旧库：applied_templates 列可能不存在
+    applied_templates = r.get("applied_templates", "[]") or "[]"
+    try:
+        applied_templates = json.loads(applied_templates)
+    except (ValueError, TypeError):
+        applied_templates = []
     return Project(
         project_id=r["project_id"],
         user_id=r["user_id"],
@@ -66,6 +74,7 @@ def _project_from_row(row: dict) -> Project:
         rate_limit_global=r.get("rate_limit_global", "1000/minute"),
         system_prompt=r.get("system_prompt", ""),
         language=r.get("language", "zh"),
+        applied_templates=applied_templates,
         created_at=r["created_at"],
         updated_at=r["updated_at"],
     )
@@ -106,6 +115,9 @@ class ProjectService:
         if "language" not in columns:
             conn.execute("ALTER TABLE projects ADD COLUMN language TEXT DEFAULT 'zh'")
             logger.info("项目表迁移：新增 language 列")
+        if "applied_templates" not in columns:
+            conn.execute("ALTER TABLE projects ADD COLUMN applied_templates TEXT DEFAULT '[]'")
+            logger.info("项目表迁移：新增 applied_templates 列")
 
     def _get_connection(self) -> sqlite3.Connection:
         """获取数据库连接。"""
@@ -241,9 +253,15 @@ class ProjectService:
         allowed_fields = {
             "name", "status", "llm_api_key", "llm_api_base", "llm_model",
             "llm_timeout", "rate_limit_per_user", "rate_limit_global", "system_prompt",
-            "language",
+            "language", "applied_templates",
         }
-        updates = {k: v for k, v in kwargs.items() if k in allowed_fields and v is not None}
+        updates = {}
+        for k, v in kwargs.items():
+            if k in allowed_fields and v is not None:
+                if k == "applied_templates":
+                    updates[k] = json.dumps(v, ensure_ascii=False)
+                else:
+                    updates[k] = v
         if not updates:
             return project
 

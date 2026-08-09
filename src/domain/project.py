@@ -22,6 +22,7 @@ class Project:
         rate_limit_global: str = "1000/minute",
         system_prompt: str = "",
         language: str = "zh",
+        applied_templates: Optional[list] = None,
         created_at: Optional[int] = None,
         updated_at: Optional[int] = None,
     ):
@@ -38,6 +39,7 @@ class Project:
         self._rate_limit_global = rate_limit_global
         self._system_prompt = system_prompt
         self._language = language
+        self._applied_templates = applied_templates or []
         now = int(time.time())
         self._created_at = created_at if created_at is not None else now
         self._updated_at = updated_at if updated_at is not None else now
@@ -105,6 +107,18 @@ class Project:
     @property
     def is_active(self) -> bool:
         return self._status == "active"
+
+    @property
+    def applied_templates(self) -> list:
+        return self._applied_templates
+
+    def has_template_applied(self, template_id: str) -> bool:
+        return template_id in self._applied_templates
+
+    def mark_template_applied(self, template_id: str) -> None:
+        if template_id not in self._applied_templates:
+            self._applied_templates.append(template_id)
+        self._updated_at = int(time.time())
 
     def __repr__(self) -> str:
         return f"Project(project_id={self._project_id}, name={self._name})"

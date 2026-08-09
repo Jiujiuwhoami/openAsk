@@ -1,9 +1,11 @@
 """电商相关 API 路由。
 
 端点：
-  - POST  /api/projects/{id}/import-products  导入商品
-  - GET   /api/templates                       FAQ 模板列表
-  - POST  /api/projects/{id}/templates/{tid}   应用模板
+  - POST  /api/projects/{id}/import-products         导入商品
+  - GET   /api/templates                              FAQ 模板列表（无 applied 状态）
+  - GET   /api/projects/{id}/templates                FAQ 模板列表（含 applied 状态）
+  - GET   /api/templates/{tid}                       模板详情（含文档，用于预览）
+  - POST  /api/projects/{id}/templates/{tid}          应用模板（防重复）
 """
 
 import os
@@ -79,13 +81,28 @@ async def import_products(
 
 @router.get("/api/templates")
 async def list_templates():
-    """获取 FAQ 模板列表。"""
+    """获取 FAQ 模板列表（不含 applied 状态）。"""
     return _template_service.list_templates()
+
+
+@router.get("/api/projects/{project_id}/templates")
+async def list_project_templates(
+    project_id: str,
+    current_user: User = Depends(get_current_user),
+):
+    """获取项目的 FAQ 模板列表（含 applied 状态）。"""
+    # 验证项目所有权
+    from src.services.project_service import ProjectService
+    project = ProjectService().get_by_id(project_id)
+    if not project or project.user_id != current_user.user_id:
+        raise HTTPException(status_code=404, detail="项目不存在")
+
+    return _template_service.list_templates(project_id=project_id)
 
 
 @router.get("/api/templates/{template_id}")
 async def get_template(template_id: str):
-    """获取模板详情。"""
+    """获取模板详情（含文档内容，用于预览）。"""
     template = _template_service.get_template(template_id)
     if not template:
         raise HTTPException(status_code=404, detail="模板不存在")
@@ -122,5 +139,9 @@ async def apply_template(
         knowledge_service=knowledge_service,
         project_id=project_id,
     )
+
+    # 已应用则返回 409 Conflict
+    if result.get("already_applied"):
+        raise HTTPException(status_code=409, detail="该模板已应用到当前项目")
 
     return result

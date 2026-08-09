@@ -286,14 +286,25 @@ class FAQTemplateService:
     """FAQ 模板服务。"""
 
     @staticmethod
-    def list_templates() -> List[Dict]:
-        """列出所有可用模板。"""
+    def list_templates(project_id: Optional[str] = None) -> List[Dict]:
+        """列出所有可用模板。
+
+        传入 project_id 时，附带每个模板是否已被该项目应用的标记。
+        """
+        applied = set()
+        if project_id:
+            from src.services.project_service import ProjectService
+            project = ProjectService().get_by_id(project_id)
+            if project:
+                applied = set(project.applied_templates)
+
         return [
             {
                 "id": tid,
                 "name": tmpl["name"],
                 "description": tmpl["description"],
                 "document_count": len(tmpl["documents"]),
+                "applied": tid in applied,
             }
             for tid, tmpl in FAQ_TEMPLATES.items()
         ]
@@ -309,10 +320,21 @@ class FAQTemplateService:
         knowledge_service,
         project_id: str,
     ) -> dict:
-        """应用模板到项目（导入模板文档）。"""
+        """应用模板到项目（导入模板文档）。
+
+        已应用过的模板会被拒绝，防止重复导入产生冗余文档。
+        """
         template = FAQ_TEMPLATES.get(template_id)
         if not template:
             return {"success": 0, "failed": 0, "errors": [f"模板不存在: {template_id}"]}
+
+        # 防重复：已应用过的模板直接拒绝
+        from src.services.project_service import ProjectService
+        project_service = ProjectService()
+        project = project_service.get_by_id(project_id)
+        if project and project.has_template_applied(template_id):
+            logger.info(f"模板已应用过，跳过: {template_id} → {project_id}")
+            return {"success": 0, "failed": 0, "already_applied": True, "errors": ["该模板已应用到当前项目"]}
 
         success = 0
         failed = 0
@@ -331,6 +353,14 @@ class FAQTemplateService:
             except Exception as e:
                 failed += 1
                 errors.append(f"{doc['title']}: {str(e)[:50]}")
+
+        # 有成功导入即标记已应用，避免下次重复导入已成功的文档
+        if success > 0 and project:
+            project.mark_template_applied(template_id)
+            project_service.update_project(
+                project_id,
+                applied_templates=project.applied_templates,
+            )
 
         logger.info(f"模板应用完成: {template_id} → {success} 成功, {failed} 失败")
         return {"success": success, "failed": failed, "errors": errors[:10]}
