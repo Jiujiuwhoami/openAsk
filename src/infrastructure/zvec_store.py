@@ -627,6 +627,57 @@ class ZvecStore(VectorStore):
             logger.error(f"列出文档失败: {e}", exc_info=True)
             raise VectorStoreError(f"Failed to list documents: {e}")
 
+    def list_by_filter(
+        self, filter_expr: str, project_id: str = DEFAULT_PROJECT_ID
+    ) -> List[Document]:
+        """按自定义 filter 表达式列出文档（同步）。
+
+        自动拼接 project_id 过滤，适合按 source / status 等字段查询。
+
+        Args:
+            filter_expr: 额外的 filter 条件，如 "source = 'template'"
+            project_id: 项目 ID
+
+        Returns:
+            匹配的文档列表，按创建时间降序排列
+        """
+        try:
+            with self._lock:
+                self._ensure_collection()
+                effective_filter = self._build_project_filter(project_id, filter_expr)
+                count = self._collection.stats.doc_count
+                if count == 0:
+                    return []
+                results = self._collection.query(
+                    filter=effective_filter,
+                    topk=min(count, 1000),
+                )
+                docs = []
+                for r in results:
+                    docs.append(
+                        Document(
+                            doc_id=r.fields.get("doc_id", r.id),
+                            content=r.fields.get("content", ""),
+                            title=r.fields.get("title", ""),
+                            tags=r.fields.get("tags", []),
+                            source=r.fields.get("source", ""),
+                            project_id=r.fields.get("project_id", DEFAULT_PROJECT_ID),
+                            created_at=r.fields.get("created_at", 0),
+                            updated_at=r.fields.get("updated_at", 0),
+                        )
+                    )
+                docs.sort(key=lambda x: x.created_at, reverse=True)
+                return docs
+        except Exception as e:
+            logger.error(f"按 filter 列出文档失败: {e}", exc_info=True)
+            raise VectorStoreError(f"Failed to list documents by filter: {e}")
+
+    async def alist_by_filter(
+        self, filter_expr: str, project_id: str = DEFAULT_PROJECT_ID
+    ) -> List[Document]:
+        """按自定义 filter 表达式列出文档（异步）。"""
+        return await asyncio.to_thread(self.list_by_filter, filter_expr, project_id)
+
     async def alist(self, project_id: str = DEFAULT_PROJECT_ID) -> List[Document]:
         """列出所有文档（按创建时间降序，异步）。"""
         return await asyncio.to_thread(self.list, project_id)

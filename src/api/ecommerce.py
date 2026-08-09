@@ -88,16 +88,24 @@ async def list_templates():
 @router.get("/api/projects/{project_id}/templates")
 async def list_project_templates(
     project_id: str,
+    request: Request,
     current_user: User = Depends(get_current_user),
 ):
-    """获取项目的 FAQ 模板列表（含 applied 状态）。"""
+    """获取项目的 FAQ 模板列表（含 applied 状态）。
+
+    应用状态通过查询知识库中 source="template" 的文档动态判断（方案B）。
+    删掉模板文档后状态自动变为未应用，可重新点击应用。
+    """
     # 验证项目所有权
     from src.services.project_service import ProjectService
     project = ProjectService().get_by_id(project_id)
     if not project or project.user_id != current_user.user_id:
         raise HTTPException(status_code=404, detail="项目不存在")
 
-    return _template_service.list_templates(project_id=project_id)
+    knowledge_service = getattr(request.app.state, "knowledge_service", None)
+    return await _template_service.list_templates(
+        project_id=project_id, knowledge_service=knowledge_service
+    )
 
 
 @router.get("/api/templates/{template_id}")

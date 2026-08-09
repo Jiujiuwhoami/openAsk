@@ -283,20 +283,46 @@ class ProductImportService:
 
 
 class FAQTemplateService:
-    """FAQ 模板服务。"""
+    """FAQ 模板服务。
+
+    模板的"应用状态"基于知识库中的实际文档动态判断（方案B）：
+    当项目的 source="template" 文档标题覆盖模板的所有文档标题时，
+    该模板被视为已应用。删除模板文档后状态自动回落，可重新应用。
+    """
 
     @staticmethod
-    def list_templates(project_id: Optional[str] = None) -> List[Dict]:
+    async def _get_applied_titles(
+        project_id: str,
+        knowledge_service,
+    ) -> set:
+        """查询项目中 source="template" 的文档标题集合。"""
+        if not knowledge_service:
+            return set()
+        docs = await knowledge_service.list_documents_by_source(
+            "template", project_id=project_id
+        )
+        return {d.title for d in docs}
+
+    @staticmethod
+    async def list_templates(
+        project_id: Optional[str] = None,
+        knowledge_service=None,
+    ) -> List[Dict]:
         """列出所有可用模板。
 
-        传入 project_id 时，附带每个模板是否已被该项目应用的标记。
+        传入 project_id 和 knowledge_service 时，通过查询知识库中
+        source="template" 的文档来计算每个模板的应用状态（方案B）。
+        删掉模板文档后状态自动变为未应用。
+
+        Returns:
+            每个模板包含 applied_count（已存在的文档数）和
+            applied（全部文档已存在时为 True）。
         """
-        applied = set()
-        if project_id:
-            from src.services.project_service import ProjectService
-            project = ProjectService().get_by_id(project_id)
-            if project:
-                applied = set(project.applied_templates)
+        applied_titles = set()
+        if project_id and knowledge_service:
+            applied_titles = await FAQTemplateService._get_applied_titles(
+                project_id, knowledge_service
+            )
 
         return [
             {
@@ -304,7 +330,13 @@ class FAQTemplateService:
                 "name": tmpl["name"],
                 "description": tmpl["description"],
                 "document_count": len(tmpl["documents"]),
-                "applied": tid in applied,
+                "applied_count": len(
+                    {d["title"] for d in tmpl["documents"]} & applied_titles
+                ),
+                "applied": (
+                    len(tmpl["documents"]) > 0
+                    and {d["title"] for d in tmpl["documents"]}.issubset(applied_titles)
+                ),
             }
             for tid, tmpl in FAQ_TEMPLATES.items()
         ]
@@ -320,27 +352,44 @@ class FAQTemplateService:
         knowledge_service,
         project_id: str,
     ) -> dict:
-        """应用模板到项目（导入模板文档）。
+        """应用模板到项目（幂等）。
 
-        已应用过的模板会被拒绝，防止重复导入产生冗余文档。
+        逐个检查模板文档在知识库中是否已存在（按标题 + source="template" 匹配），
+        已存在的跳过，缺失的才创建。全部已存在时返回 already_applied。
+        删掉部分文档后重新应用，会补全缺失的文档（部分应用恢复）。
         """
         template = FAQ_TEMPLATES.get(template_id)
         if not template:
             return {"success": 0, "failed": 0, "errors": [f"模板不存在: {template_id}"]}
 
-        # 防重复：已应用过的模板直接拒绝
-        from src.services.project_service import ProjectService
-        project_service = ProjectService()
-        project = project_service.get_by_id(project_id)
-        if project and project.has_template_applied(template_id):
-            logger.info(f"模板已应用过，跳过: {template_id} → {project_id}")
-            return {"success": 0, "failed": 0, "already_applied": True, "errors": ["该模板已应用到当前项目"]}
+        # 查询项目里已有的模板文档标题
+        existing_docs = await knowledge_service.list_documents_by_source(
+            "template", project_id=project_id
+        )
+        existing_titles = {d.title for d in existing_docs}
 
+        doc_titles = {d["title"] for d in template["documents"]}
+        if doc_titles and doc_titles.issubset(existing_titles):
+            logger.info(
+                f"模板文档已全部存在，跳过: {template_id} → {project_id}"
+            )
+            return {
+                "success": 0,
+                "failed": 0,
+                "already_applied": True,
+                "errors": ["该模板已应用到当前项目"],
+            }
+
+        # 逐文档导入：已存在的跳过，缺失的创建
         success = 0
         failed = 0
         errors = []
 
         for doc in template["documents"]:
+            if doc["title"] in existing_titles:
+                # 已存在（可能是上次部分应用），跳过避免重复导入
+                logger.debug(f"模板文档已存在，跳过: {doc['title']}")
+                continue
             try:
                 await knowledge_service.create_document_from_text(
                     title=doc["title"],
@@ -348,19 +397,14 @@ class FAQTemplateService:
                     tags=doc["tags"],
                     source="template",
                     project_id=project_id,
+                    skip_duplicate_check=True,
                 )
                 success += 1
             except Exception as e:
                 failed += 1
                 errors.append(f"{doc['title']}: {str(e)[:50]}")
 
-        # 有成功导入即标记已应用，避免下次重复导入已成功的文档
-        if success > 0 and project:
-            project.mark_template_applied(template_id)
-            project_service.update_project(
-                project_id,
-                applied_templates=project.applied_templates,
-            )
-
-        logger.info(f"模板应用完成: {template_id} → {success} 成功, {failed} 失败")
+        logger.info(
+            f"模板应用完成: {template_id} → {success} 新建, {failed} 失败"
+        )
         return {"success": success, "failed": failed, "errors": errors[:10]}

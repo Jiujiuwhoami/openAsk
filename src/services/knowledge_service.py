@@ -300,6 +300,18 @@ class KnowledgeService:
             page=page, page_size=page_size, project_id=project_id
         )
 
+    async def list_documents_by_source(
+        self, source: str, project_id: str = DEFAULT_PROJECT_ID
+    ) -> List[DomainDocument]:
+        """列出指定来源（source）的文档（异步）。
+
+        用于按来源筛选文档，例如查询 source="template" 的模板文档，
+        以动态判断模板应用状态。
+        """
+        return await self._vector_store.alist_by_filter(
+            f"source = '{source}'", project_id=project_id
+        )
+
     async def list_documents_filtered(
         self,
         page: int = 1,

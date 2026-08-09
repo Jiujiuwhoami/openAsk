@@ -31,6 +31,12 @@ _analytics = AnalyticsService()
 _project_service = ProjectService()
 
 
+class BatchDeleteRequest(BaseModel):
+    """批量删除日志请求。"""
+
+    log_ids: list[int]
+
+
 def _verify_project_owner(project_id: str, user: User):
     """验证用户是项目所有者。"""
     project = _project_service.get_by_id(project_id)
@@ -54,6 +60,45 @@ async def get_logs(
     """获取问答日志列表（分页）。"""
     _verify_project_owner(project_id, current_user)
     return _analytics.get_logs(project_id, page=page, page_size=page_size, search=search)
+
+
+@router.delete("/api/projects/{project_id}/logs")
+async def delete_logs(
+    project_id: str,
+    current_user: User = Depends(get_current_user),
+):
+    """清空项目的所有问答日志。"""
+    _verify_project_owner(project_id, current_user)
+    count = _analytics.delete_logs(project_id)
+    return {"message": f"已删除 {count} 条日志", "deleted": count}
+
+
+@router.post("/api/projects/{project_id}/logs/batch-delete")
+async def batch_delete_logs(
+    project_id: str,
+    body: BatchDeleteRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """批量删除日志。"""
+    _verify_project_owner(project_id, current_user)
+    if not body.log_ids:
+        raise HTTPException(status_code=400, detail="log_ids 不能为空")
+    count = _analytics.delete_logs_batch(body.log_ids, project_id)
+    return {"message": f"已删除 {count} 条日志", "deleted": count}
+
+
+@router.delete("/api/projects/{project_id}/logs/{log_id}")
+async def delete_log(
+    project_id: str,
+    log_id: int,
+    current_user: User = Depends(get_current_user),
+):
+    """删除单条问答日志。"""
+    _verify_project_owner(project_id, current_user)
+    deleted = _analytics.delete_log(log_id, project_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="日志不存在")
+    return {"message": "日志已删除"}
 
 
 @router.get("/api/projects/{project_id}/logs/export")

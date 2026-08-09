@@ -223,6 +223,55 @@ class AnalyticsService:
         finally:
             conn.close()
 
+    def delete_logs(self, project_id: str) -> int:
+        """删除项目的所有问答日志。返回删除的条数。"""
+        with self._lock:
+            conn = self._get_connection()
+            try:
+                cur = conn.execute("DELETE FROM chat_logs WHERE project_id = ?", (project_id,))
+                conn.commit()
+                count = cur.rowcount
+                logger.info(f"问答日志已清空: project={project_id} deleted={count}")
+                return count
+            finally:
+                conn.close()
+
+    def delete_log(self, log_id: int, project_id: str) -> bool:
+        """删除单条问答日志。返回是否删除了记录。"""
+        with self._lock:
+            conn = self._get_connection()
+            try:
+                cur = conn.execute(
+                    "DELETE FROM chat_logs WHERE id = ? AND project_id = ?",
+                    (log_id, project_id),
+                )
+                conn.commit()
+                deleted = cur.rowcount > 0
+                if deleted:
+                    logger.info(f"问答日志已删除: log_id={log_id} project={project_id}")
+                return deleted
+            finally:
+                conn.close()
+
+    def delete_logs_batch(self, log_ids: List[int], project_id: str) -> int:
+        """批量删除指定日志。返回删除的条数。"""
+        if not log_ids:
+            return 0
+        placeholders = ",".join("?" * len(log_ids))
+        with self._lock:
+            conn = self._get_connection()
+            try:
+                cur = conn.execute(
+                    f"DELETE FROM chat_logs WHERE id IN ({placeholders}) AND project_id = ?",
+                    (*log_ids, project_id),
+                )
+                conn.commit()
+                count = cur.rowcount
+                logger.info(f"问答日志批量删除: project={project_id} deleted={count}")
+                return count
+            finally:
+                conn.close()
+
     def export_logs(
         self,
         project_id: str,
