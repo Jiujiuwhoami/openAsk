@@ -176,11 +176,14 @@ def client():
     """创建测试客户端，使用 Mock 组件和 Mock ProjectService。"""
     from src.utils.limiter import limiter
     import src.api.routes as routes_module
+    import src.api.dependencies as deps_module
 
-    # 替换 routes 中的 _project_service
+    # 替换 routes + dependencies 中的 _project_service
     test_project_svc = MockProjectService()
     _original_project_service = routes_module._project_service
+    _original_deps_project_service = deps_module._project_service
     routes_module._project_service = test_project_svc
+    deps_module._project_service = test_project_svc
 
     # 创建 Mock 组件
     mock_retriever = MockRetriever()
@@ -200,6 +203,7 @@ def client():
 
     # 恢复原始实例
     routes_module._project_service = _original_project_service
+    deps_module._project_service = _original_deps_project_service
 
 
 # ================================================================

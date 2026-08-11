@@ -49,6 +49,7 @@ from src.api.billing import router as billing_router
 from src.api.analytics import router as analytics_router
 from src.api.ecommerce import router as ecommerce_router
 from src.api.conversations import router as conversations_router
+from src.api.widget import router as widget_router
 from src.api.admin import router as admin_router
 from src.api.schemas import ErrorResponse
 from src.domain.exceptions import (
@@ -469,6 +470,7 @@ app.include_router(ecommerce_router)
 app.include_router(admin_router)
 app.include_router(agent_router)
 app.include_router(canned_router)
+app.include_router(widget_router)
 app.include_router(ws_router)
 app.include_router(router)
 

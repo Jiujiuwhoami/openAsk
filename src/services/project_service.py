@@ -32,6 +32,7 @@ CREATE TABLE IF NOT EXISTS projects (
     rate_limit_global TEXT DEFAULT '1000/minute',
     system_prompt TEXT DEFAULT '',
     language TEXT DEFAULT 'zh',
+    allowed_domains TEXT DEFAULT '[]',
     applied_templates TEXT DEFAULT '[]',
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL
@@ -54,12 +55,17 @@ CREATE TABLE IF NOT EXISTS project_stats (
 def _project_from_row(row: dict) -> Project:
     """从 SQLite 行记录构建 Project 实例。"""
     r = dict(row)  # sqlite3.Row → dict（支持 .get()）
-    # 兼容旧库：applied_templates 列可能不存在
+    # 兼容旧库：applied_templates / allowed_domains 列可能不存在
     applied_templates = r.get("applied_templates", "[]") or "[]"
     try:
         applied_templates = json.loads(applied_templates)
     except (ValueError, TypeError):
         applied_templates = []
+    allowed_domains = r.get("allowed_domains", "[]") or "[]"
+    try:
+        allowed_domains = json.loads(allowed_domains)
+    except (ValueError, TypeError):
+        allowed_domains = []
     return Project(
         project_id=r["project_id"],
         user_id=r["user_id"],
@@ -74,6 +80,7 @@ def _project_from_row(row: dict) -> Project:
         rate_limit_global=r.get("rate_limit_global", "1000/minute"),
         system_prompt=r.get("system_prompt", ""),
         language=r.get("language", "zh"),
+        allowed_domains=allowed_domains,
         applied_templates=applied_templates,
         created_at=r["created_at"],
         updated_at=r["updated_at"],
@@ -115,13 +122,16 @@ class ProjectService:
         if "language" not in columns:
             conn.execute("ALTER TABLE projects ADD COLUMN language TEXT DEFAULT 'zh'")
             logger.info("项目表迁移：新增 language 列")
+        if "allowed_domains" not in columns:
+            conn.execute("ALTER TABLE projects ADD COLUMN allowed_domains TEXT DEFAULT '[]'")
+            logger.info("项目表迁移：新增 allowed_domains 列")
         if "applied_templates" not in columns:
             conn.execute("ALTER TABLE projects ADD COLUMN applied_templates TEXT DEFAULT '[]'")
             logger.info("项目表迁移：新增 applied_templates 列")
 
     def _get_connection(self) -> sqlite3.Connection:
         """获取数据库连接。"""
-        conn = sqlite3.connect(self._db_path)
+        conn = sqlite3.connect(self._db_path, timeout=5)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA foreign_keys=ON")
@@ -142,6 +152,7 @@ class ProjectService:
         rate_limit_global: str = "1000/minute",
         system_prompt: str = "",
         language: str = "zh",
+        allowed_domains: Optional[list] = None,
     ) -> Project:
         """创建新项目，自动生成 API Key。
 
@@ -166,13 +177,13 @@ class ProjectService:
                         project_id, user_id, api_key, name, status,
                         llm_api_key, llm_api_base, llm_model, llm_timeout,
                         rate_limit_per_user, rate_limit_global, system_prompt,
-                        language, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        language, allowed_domains, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         project_id, user_id, key, name,
                         llm_api_key, llm_api_base, llm_model, llm_timeout,
                         rate_limit_per_user, rate_limit_global, system_prompt,
-                        language, now, now,
+                        language, json.dumps(allowed_domains or [], ensure_ascii=False), now, now,
                     ),
                 )
                 # 初始化 stats 记录
@@ -253,12 +264,12 @@ class ProjectService:
         allowed_fields = {
             "name", "status", "llm_api_key", "llm_api_base", "llm_model",
             "llm_timeout", "rate_limit_per_user", "rate_limit_global", "system_prompt",
-            "language", "applied_templates",
+            "language", "allowed_domains", "applied_templates",
         }
         updates = {}
         for k, v in kwargs.items():
             if k in allowed_fields and v is not None:
-                if k == "applied_templates":
+                if k in ("applied_templates", "allowed_domains"):
                     updates[k] = json.dumps(v, ensure_ascii=False)
                 else:
                     updates[k] = v

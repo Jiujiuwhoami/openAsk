@@ -47,6 +47,7 @@ from src.domain.exceptions import KnowledgeBaseError, DocumentNotFoundError
 from src.services.project_service import ProjectService
 from src.utils.config import settings
 from src.utils.logger import get_logger
+from src.api.dependencies import resolve_widget_project
 
 logger = get_logger(__name__)
 
@@ -196,7 +197,7 @@ def _get_messages_for_llm(
 async def chat(
     request: Request,
     body: ChatRequest,
-    project=Depends(resolve_project),
+    project=Depends(resolve_widget_project),
     retriever=Depends(get_retriever_for_project),
 ):
     """聊天接口：基于知识库回答用户问题。
@@ -297,7 +298,7 @@ async def chat(
 async def chat_stream(
     request: Request,
     body: ChatRequest,
-    project=Depends(resolve_project),
+    project=Depends(resolve_widget_project),
     retriever=Depends(get_retriever_for_project),
 ):
     """流式聊天接口：逐事件返回回答（SSE 格式）。
@@ -440,7 +441,7 @@ async def chat_stream(
 async def widget_poll(
     conversation_id: str = Query(..., description="会话 ID"),
     since_id: int = Query(0, ge=0, description="上次收到的最大消息 ID"),
-    project=Depends(resolve_project),
+    project=Depends(resolve_widget_project),
 ):
     """Widget 轮询：获取会话状态变更和客服新消息。"""
     conv = _conv_service.get_conversation(conversation_id)
@@ -467,7 +468,7 @@ async def widget_poll(
 @router.post("/chat/message")
 async def widget_send_message(
     body: WidgetMessageRequest,
-    project=Depends(resolve_project),
+    project=Depends(resolve_widget_project),
 ):
     """Widget 用户发送消息（人工模式）。仅当会话处于 agent 状态时可用。"""
     conv = _conv_service.get_conversation(body.conversation_id)

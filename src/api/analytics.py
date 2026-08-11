@@ -16,7 +16,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
 
-from src.api.dependencies import get_current_user
+from src.api.dependencies import get_current_user, resolve_widget_project
 from src.api.routes import resolve_project
 from src.domain.user import User
 from src.domain.project import Project
@@ -218,7 +218,7 @@ class CsatStatsResponse(BaseModel):
 @router.post("/api/feedback/csat")
 async def submit_csat(
     body: CsatRequest,
-    project: Project = Depends(resolve_project),
+    project: Project = Depends(resolve_widget_project),
 ):
     """提交 CSAT 满意度评价（X-API-Key 鉴权，Widget 调用）。"""
     conv = _conv_service.get_conversation(body.conversation_id)
@@ -282,7 +282,7 @@ class HandoffRequest(BaseModel):
 async def submit_handoff(
     project_id: str,
     body: HandoffRequest,
-    project: Project = Depends(resolve_project),
+    project: Project = Depends(resolve_widget_project),
 ):
     """提交人工客服转接请求。
 
@@ -393,7 +393,7 @@ async def submit_handoff(
 async def cancel_handoff(
     project_id: str,
     body: HandoffRequest,
-    project: Project = Depends(resolve_project),
+    project: Project = Depends(resolve_widget_project),
 ):
     """取消排队中的转接请求，将会话恢复为 AI 模式。
 

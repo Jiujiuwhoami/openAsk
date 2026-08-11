@@ -12,6 +12,7 @@ from src.domain.user import User
 from src.domain.exceptions import ProjectNotFoundError
 from src.services.project_service import ProjectService
 from src.services.embed_script import generate_embed_script
+from src.utils.config import settings
 
 router = APIRouter(prefix="/api/projects")
 _project_service = ProjectService()
@@ -36,6 +37,7 @@ class UpdateProjectRequest(BaseModel):
     rate_limit_global: Optional[str] = Field(None, description="全局限流")
     system_prompt: Optional[str] = Field(None, description="自定义系统 Prompt")
     language: Optional[str] = Field(None, pattern="^(zh|en)$", description="回答语言: zh/en")
+    allowed_domains: Optional[list[str]] = Field(None, description="域名白名单", examples=[["example.com", "shop.example.com"]])
 
 
 class ProjectResponse(BaseModel):
@@ -57,6 +59,7 @@ class ProjectDetailResponse(BaseModel):
     rate_limit_global: str
     system_prompt: str
     language: str
+    allowed_domains: list[str] = Field(default_factory=list, description="域名白名单")
     created_at: int
     updated_at: int
 
@@ -155,6 +158,7 @@ async def get_project(
         rate_limit_global=project.rate_limit_global,
         system_prompt=project.system_prompt,
         language=project.language,
+        allowed_domains=project.allowed_domains,
         created_at=project.created_at,
         updated_at=project.updated_at,
     )
@@ -264,10 +268,18 @@ async def get_embed_script(
     if not project or project.user_id != current_user.user_id:
         raise HTTPException(status_code=404, detail="项目不存在")
 
-    # 从请求中推导 API 地址（优先 X-Forwarded-Proto/Host，兼容反向代理）
-    scheme = request.headers.get("x-forwarded-proto", request.url.scheme)
-    host = request.headers.get("x-forwarded-host", request.headers.get("host", "localhost:8000"))
-    api_base = f"{scheme}://{host}"
+    # 从 frontend_url 推导 API 地址（同一主机，后端端口）
+    # 解决 Vite 代理导致 Host 头变为 localhost:8000 的问题
+    from urllib.parse import urlparse
+    parsed = urlparse(settings.api.frontend_url)
+    if parsed.hostname:
+        api_base = f"{parsed.scheme}://{parsed.hostname}:{settings.api.port}"
+    else:
+        # 回退到请求头推导（兼容反向代理 X-Forwarded-*）
+        scheme = request.headers.get("x-forwarded-proto", request.url.scheme)
+        host = request.headers.get("x-forwarded-host", request.headers.get("host", "localhost:8000"))
+        api_base = f"{scheme}://{host}"
 
-    script = generate_embed_script(project_id, api_key=project.api_key, api_base=api_base)
+    # v2 安全版：不再嵌入 API Key，只含 project_id，运行时换取短期 Widget Token
+    script = generate_embed_script(project_id, api_base=api_base)
     return EmbedScriptResponse(script=script)

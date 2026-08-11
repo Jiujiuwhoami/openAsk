@@ -22,6 +22,7 @@ class Project:
         rate_limit_global: str = "1000/minute",
         system_prompt: str = "",
         language: str = "zh",
+        allowed_domains: Optional[list] = None,
         applied_templates: Optional[list] = None,
         created_at: Optional[int] = None,
         updated_at: Optional[int] = None,
@@ -39,6 +40,7 @@ class Project:
         self._rate_limit_global = rate_limit_global
         self._system_prompt = system_prompt
         self._language = language
+        self._allowed_domains = allowed_domains or []
         self._applied_templates = applied_templates or []
         now = int(time.time())
         self._created_at = created_at if created_at is not None else now
@@ -107,6 +109,11 @@ class Project:
     @property
     def is_active(self) -> bool:
         return self._status == "active"
+
+    @property
+    def allowed_domains(self) -> list:
+        """允许嵌入客服插件的域名白名单。"""
+        return self._allowed_domains
 
     @property
     def applied_templates(self) -> list:

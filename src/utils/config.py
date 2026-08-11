@@ -162,6 +162,7 @@ class AuthSettings(BaseSettings):
     algorithm: str = "HS256"
     access_token_expire_minutes: int = 1440  # 24 hours
     admin_emails: str = ""  # 逗号分隔的管理员邮箱白名单
+    widget_token_expire_minutes: int = 60  # Widget 嵌入 token 过期分钟数
 
 
 class StripeSettings(BaseSettings):

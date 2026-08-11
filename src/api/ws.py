@@ -28,6 +28,7 @@ from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
 from src.services.user_service import UserService
 from src.services.project_service import ProjectService
 from src.services.conversation_service import ConversationService
+from src.services.widget_token import verify_widget_token
 from src.services.ws_manager import get_manager
 from src.utils.logger import get_logger
 
@@ -59,13 +60,30 @@ async def _authenticate_agent(token: str) -> Optional[dict]:
 
 
 async def _authenticate_widget(api_key: str, project_id: str) -> Optional[dict]:
-    """通过 API Key 验证 Widget 用户身份。返回 {user_id, is_agent} 或 None。"""
+    """通过 API Key 验证 Widget 用户身份。返回 {user_id, is_agent} 或 None。
+
+    兼容旧版嵌入脚本（已部署的脚本仍使用 api_key 参数）。
+    """
     project = _project_service.get_by_api_key(api_key)
     if project is None or not project.is_active:
         return None
     if project.project_id != project_id:
         return None
     # Widget 用户使用项目 ID 作为 user_id 前缀
+    return {"user_id": f"widget_{project_id}", "is_agent": False, "project": project}
+
+
+async def _authenticate_widget_token(token: str) -> Optional[dict]:
+    """通过 Widget Token 验证 Widget 用户身份。返回 {user_id, is_agent} 或 None。
+
+    Widget Token 是短期 JWT（type=widget），由 /api/widget/session 签发。
+    """
+    project_id = verify_widget_token(token)
+    if not project_id:
+        return None
+    project = _project_service.get_by_id(project_id)
+    if project is None or not project.is_active:
+        return None
     return {"user_id": f"widget_{project_id}", "is_agent": False, "project": project}
 
 
@@ -81,15 +99,22 @@ async def websocket_endpoint(
 
     # 鉴权
     if token:
-        auth = await _authenticate_agent(token)
-        if auth is None:
-            await ws.close(code=1008, reason="无效的认证 token")
-            return
-        user_id = auth["user_id"]
-        is_agent = True
-        # 客服可能属于多个项目，注册项目频道
-        projects = _project_service.list_by_user(user_id)
-        project_ids = [p.project_id for p in projects] if projects else []
+        # 先尝试 Widget Token（type=widget），再尝试客服 JWT（type=access）
+        widget_auth = await _authenticate_widget_token(token)
+        if widget_auth:
+            user_id = widget_auth["user_id"]
+            is_agent = False
+            project_ids = [widget_auth["project"].project_id]
+        else:
+            auth = await _authenticate_agent(token)
+            if auth is None:
+                await ws.close(code=1008, reason="无效的认证 token")
+                return
+            user_id = auth["user_id"]
+            is_agent = True
+            # 客服可能属于多个项目，注册项目频道
+            projects = _project_service.list_by_user(user_id)
+            project_ids = [p.project_id for p in projects] if projects else []
     elif api_key and project_id:
         auth = await _authenticate_widget(api_key, project_id)
         if auth is None:

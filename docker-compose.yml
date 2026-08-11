@@ -25,6 +25,8 @@ services:
       - RATE_LIMIT_STORAGE_URI=redis://redis:6379/0
       # 模型已缓存，禁止联网检查（容器无网络）
       - HF_HUB_OFFLINE=1
+      # 管理后台前端地址（Widget 域名白名单预览需要）
+      - API_FRONTEND_URL=${API_FRONTEND_URL:-http://localhost:5173}
     volumes:
       # 数据持久化（挂载父目录，zvec 自己创建子目录）
       - ./data:/app/data

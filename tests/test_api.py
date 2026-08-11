@@ -296,9 +296,14 @@ def client():
     test_project_svc = MockProjectService()
 
     # 覆盖 routes 中的 _project_service，返回 mock 实例
+    # resolve_project 使用 routes_module._project_service
+    # resolve_widget_project 使用 dependencies._project_service
     import src.api.routes as routes_module
+    import src.api.dependencies as deps_module
     _original_project_service = routes_module._project_service
+    _original_deps_project_service = deps_module._project_service
     routes_module._project_service = test_project_svc
+    deps_module._project_service = test_project_svc
 
     # 创建 MockRetriever 和 Factory
     mock_retriever = MockRetriever()
@@ -321,6 +326,7 @@ def client():
 
     # 恢复原始实例
     routes_module._project_service = _original_project_service
+    deps_module._project_service = _original_deps_project_service
 
 
 # ================================================================
