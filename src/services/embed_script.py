@@ -156,9 +156,8 @@ function submitHandoff(reason){{
 }}
 handoffBtn.addEventListener('click',function(){{
   if(agentMode)return;
-  var reason=window.prompt('请简单描述您的问题，以便我们为您转接更合适的客服（可选）：','');
-  if(reason===null)return;
-  submitHandoff(reason?reason.trim():'');
+  // 直接转人工，不弹窗询问（减少客户操作摩擦）
+  submitHandoff('');
 }});
 // WebSocket 连接（优先实时，失败自动降级轮询）
 var ws=null,wsFail=false;
