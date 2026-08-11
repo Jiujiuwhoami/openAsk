@@ -5,7 +5,7 @@
 功能特性：
   - 对话持久化（localStorage + conversation_id，支持多轮上下文）
   - 多语言支持（zh/en）
-  - 人工客服转接
+  - 人工客服转接 + 实时轮询客服消息
   - 超时处理（30s 自动超时，断开时可重试）
   - 清空对话按钮
   - 使用 CSS 类替代内联样式
@@ -32,23 +32,9 @@ def generate_embed_script(
     greeting: str = "你好！有什么可以帮你的？",
     language: str = "zh",
 ) -> str:
-    """生成嵌入脚本 HTML 代码。
-
-    Args:
-        project_id: 项目 ID，编译到脚本中
-        api_key: 项目 API Key（sk_ 开头），用于 X-API-Key 鉴权
-        api_base: API 地址，默认使用当前服务地址
-        primary_color: 主题色（HEX 格式），默认 #409eff
-        title: 聊天窗口标题
-        greeting: 初始问候语
-        language: 回答语言（zh/en）
-
-    Returns:
-        完整的 <script> 标签 HTML 代码
-    """
+    """生成嵌入脚本 HTML 代码。"""
     base = api_base or f"http://localhost:{settings.api.port}"
 
-    # 转义嵌入字符串
     pid = _html.escape(project_id, quote=True)
     key = _html.escape(api_key, quote=True)
     b = _html.escape(base, quote=True)
@@ -56,7 +42,6 @@ def generate_embed_script(
     g = _html.escape(greeting, quote=True)
     lang = _html.escape(language, quote=True)
 
-    # 压缩后的 CSS
     css = _minify_css(f"""
         #openask-widget{{all:initial;position:fixed;bottom:20px;right:20px;z-index:999999;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif}}
         #openask-widget *{{box-sizing:border-box}}
@@ -78,6 +63,7 @@ def generate_embed_script(
         #openask-msgs .msg .retry-btn:hover{{border-color:#409eff;background:#ecf5ff}}
         #openask-msgs .msg .handoff-btn{{display:inline-block;margin:4px 0 0;padding:4px 12px;border:1px solid #e6a23c;border-radius:4px;font-size:12px;color:#e6a23c;cursor:pointer;background:#fff;line-height:1.5}}
         #openask-msgs .msg .handoff-btn:hover{{border-color:#d4880f;background:#fff7e6}}
+        #openask-msgs .msg .handoff-notice .bubble{{border-color:#e6a23c;background:#fffbe6;color:#d4880f}}
         #openask-msgs .greeting{{text-align:center;color:#999;margin-top:160px}}
         #openask-input-row{{display:flex;border-top:1px solid #eee;padding:8px 12px;gap:8px;background:#fff;align-items:center}}
         #openask-clear{{border:none;background:none;cursor:pointer;font-size:16px;padding:0 4px;color:#c0c4cc;line-height:1;transition:color .2s}}
@@ -87,6 +73,9 @@ def generate_embed_script(
         #openask-input:disabled{{background:#f5f7fa;cursor:not-allowed}}
         #openask-send{{padding:8px 16px;border:none;border-radius:6px;background:{primary_color};color:#fff;cursor:pointer;font-size:14px;white-space:nowrap}}
         #openask-send:disabled{{opacity:.6;cursor:not-allowed}}
+        #openask-handoff{{padding:6px 10px;border:1px solid {primary_color};border-radius:6px;background:#fff;color:{primary_color};cursor:pointer;font-size:12px;white-space:nowrap;line-height:1}}
+        #openask-handoff:hover{{background:{primary_color};color:#fff}}
+        #openask-handoff:disabled{{opacity:.5;cursor:not-allowed}}
         #openask-powered{{text-align:center;font-size:10px;color:#bbb;padding:4px;background:#fff}}
         #openask-powered a{{color:#bbb;text-decoration:none}}
     """)
@@ -112,7 +101,7 @@ function setSid(sid){{try{{localStorage.setItem(SID_KEY,sid);}}catch(e){{}}}}
 var w=el('div');w.id='openask-widget';
 var btn=el('div');btn.id='openask-btn';btn.textContent='💬';
 var panel=el('div');panel.id='openask-panel';
-panel.innerHTML='<div id="openask-header"><span></span><span id="openask-close">✕</span></div><div id="openask-msgs"></div><div id="openask-input-row"><button id="openask-clear" title="清空对话">🗱</button><input id="openask-input" placeholder="输入你的问题…"><button id="openask-send">发送</button></div><div id="openask-powered">Powered by <a href="https://openask.dev" target="_blank" rel="noopener">OpenAsk</a></div>';
+panel.innerHTML='<div id="openask-header"><span></span><span id="openask-close">✕</span></div><div id="openask-msgs"></div><div id="openask-input-row"><button id="openask-clear" title="清空对话">🗱</button><input id="openask-input" placeholder="输入你的问题…"><button id="openask-handoff" title="转人工客服">转人工</button><button id="openask-send">发送</button></div><div id="openask-powered">Powered by <a href="https://openask.dev" target="_blank" rel="noopener">OpenAsk</a></div>';
 w.appendChild(btn);w.appendChild(panel);d.body.appendChild(w);
 panel.querySelector('#openask-header span').textContent=title;
 var msgs=panel.querySelector('#openask-msgs');
@@ -122,17 +111,147 @@ if(history.length===0){{msgs.appendChild(el('div','greeting')).textContent=greet
 for(var i=0;i<history.length;i++){{msgs.appendChild(bubble(history[i].t,history[i].r==='u'));}}
 msgs.scrollTop=msgs.scrollHeight;
 var inp=panel.querySelector('#openask-input'),send=panel.querySelector('#openask-send');
-var clearBtn=panel.querySelector('#openask-clear');
+var clearBtn=panel.querySelector('#openask-clear'),handoffBtn=panel.querySelector('#openask-handoff');
 function open(){{btn.classList.add('open');panel.classList.add('open');inp.focus();}}
 function close(){{btn.classList.remove('open');panel.classList.remove('open');}}
 btn.addEventListener('click',open);
 panel.querySelector('#openask-close').addEventListener('click',close);
-clearBtn.addEventListener('click',function(){{msgs.innerHTML='';msgs.appendChild(el('div','greeting')).textContent=greeting;clearHistory();}});
-function addMsg(text,user){{msgs.appendChild(bubble(text,user));saveHistory();msgs.scrollTop=msgs.scrollHeight;}}
+// 人工客服模式
+var agentMode=false,lastMsgId=0,pollTimer=null,wsFail=false,lastQuery='';
+clearBtn.addEventListener('click',function(){{msgs.innerHTML='';msgs.appendChild(el('div','greeting')).textContent=greeting;clearHistory();agentMode=false;stopPoll();stopWs();}});
+function addMsg(text,user,cls){{if(cls){{var m=el('div','msg'+(user?' user':' bot'));var b=el('div','bubble'+(cls?' '+cls:''));b.textContent=text;m.appendChild(b);msgs.appendChild(m);}}else{{msgs.appendChild(bubble(text,user));}}saveHistory();msgs.scrollTop=msgs.scrollHeight;}}
+// 转人工请求（用户主动发起，支持原因 + 排队位置展示 + 取消排队）
+function submitHandoff(reason){{
+  var sid=getSid();if(!sid)return;
+  handoffBtn.disabled=true;handoffBtn.textContent='提交中…';
+  fetch(base+'/api/projects/'+pid+'/handoff',{{
+    method:'POST',headers:{{'Content-Type':'application/json','X-API-Key':key}},
+    body:JSON.stringify({{conversation_id:sid,query:lastQuery||'',contact_email:'',contact_phone:'',note:reason||'',reason:'user_initiated',priority:0}})
+  }})
+  .then(function(r){{if(!r.ok)throw new Error('HTTP '+r.status);return r.json();}})
+  .then(function(data){{
+    addMsg('已提交转人工请求，等待客服接入…',false,'handoff-notice');
+    if(data.status==='agent'){{
+      agentMode=true;handoffBtn.style.display='none';
+      addMsg('有客服在线，已为您接入人工客服',false,'handoff-notice');
+      startWs();return;
+    }}
+    if(data.queue_position>0){{addMsg('当前排队位置：第 '+(data.queue_position+1)+' 位，预计等待约 '+Math.ceil(data.estimated_wait_seconds/60)+' 分钟',false,'handoff-notice');}}
+    var cancelBtn=document.createElement('span');cancelBtn.className='handoff-btn';cancelBtn.textContent='取消排队';
+    cancelBtn.addEventListener('click',function(){{
+      fetch(base+'/api/projects/'+pid+'/handoff/cancel',{{
+        method:'POST',headers:{{'Content-Type':'application/json','X-API-Key':key}},
+        body:JSON.stringify({{conversation_id:sid,query:''}})
+      }})
+      .then(function(r){{return r.json();}})
+      .then(function(){{addMsg('已取消排队，可继续使用AI服务',false,'handoff-notice');stopWs();}})
+      .catch(function(){{addMsg('取消失败，请稍后重试',false,'handoff-notice');}});
+      cancelBtn.remove();
+    }});
+    msgs.lastChild.querySelector('.bubble').after(cancelBtn);
+    startWs();
+  }})
+  .catch(function(){{addMsg('提交失败，请稍后重试',false,'handoff-notice');}})
+  .finally(function(){{handoffBtn.disabled=false;handoffBtn.textContent='转人工';}});
+}}
+handoffBtn.addEventListener('click',function(){{
+  if(agentMode)return;
+  var reason=window.prompt('请简单描述您的问题，以便我们为您转接更合适的客服（可选）：','');
+  if(reason===null)return;
+  submitHandoff(reason?reason.trim():'');
+}});
+// WebSocket 连接（优先实时，失败自动降级轮询）
+var ws=null,wsFail=false;
+function wsUrl(){{var p=base.replace(/^http/,'ws');return p+'/ws?api_key='+encodeURIComponent(key)+'&project_id='+encodeURIComponent(pid);}}
+function startWs(){{
+  if(wsFail||!window.WebSocket){{startPoll();return;}}
+  try{{ws=new WebSocket(wsUrl());}}catch(e){{wsFail=true;startPoll();return;}}
+  ws.onopen=function(){{if(pollTimer)stopPoll();}};
+  ws.onmessage=function(ev){{var d;try{{d=JSON.parse(ev.data);}}catch(e){{return;}}
+    if(d.type==='message.new'&&d.data&&d.data.message){{
+      var m=d.data.message;
+      if(m.role==='agent'){{if(!agentMode){{agentMode=true;addMsg('已接入人工客服，客服将为您服务',false,'handoff-notice');handoffBtn.style.display='none';}}addMsg('客服: '+m.content,false);}}
+      if(m.role==='system'){{addMsg(m.content,false);}}
+      if(m.role==='user'){{if(m.content!==lastQuery)addMsg(m.content,true);}}
+      if(m.id>lastMsgId)lastMsgId=m.id;
+    }}
+    if(d.type==='message.typing'&&d.data&&d.data.conversation_id){{
+      var cm=msgs.querySelector('#openask-typing');
+      if(!cm){{cm=el('div','msg bot');cm.id='openask-typing';var cb=el('div','bubble');cb.textContent='客服正在输入...';cb.style.fontStyle='italic';cb.style.color='#999';cm.appendChild(cb);msgs.appendChild(cm);msgs.scrollTop=msgs.scrollHeight;}}
+      clearTimeout(window._typingTimer);
+      window._typingTimer=setTimeout(function(){{if(cm&&cm.parentNode)cm.parentNode.removeChild(cm);}},3000);
+    }}
+    if(d.type==='conversation.status'&&d.data){{
+      if(d.data.status==='agent'&&!agentMode){{agentMode=true;addMsg('已接入人工客服，客服将为您服务',false,'handoff-notice');handoffBtn.style.display='none';}}
+      if(d.data.status==='active'){{agentMode=false;handoffBtn.style.display='';addMsg('客服已结束会话，您可继续使用AI服务',false,'handoff-notice');showCsat();}}
+    }}
+  }};
+  ws.onclose=function(){{if(!wsFail){{wsFail=true;startPoll();}}}};
+  ws.onerror=function(){{try{{ws.close();}}catch(e){{}} }};
+}}
+function stopWs(){{if(ws){{try{{ws.close();}}catch(e){{}}ws=null;}}}}
+// 轮询客服消息（3s 间隔，WebSocket 不可用时的降级方案）
+function startPoll(){{
+  stopPoll();
+  pollTimer=setInterval(function(){{
+    var sid=getSid();if(!sid)return;
+    fetch(base+'/api/chat/poll?conversation_id='+sid+'&since_id='+lastMsgId,{{
+      headers:{{'X-API-Key':key}}
+    }})
+    .then(function(r){{if(!r.ok)throw new Error();return r.json();}})
+    .then(function(data){{
+      if(!agentMode&&data.status==='agent'){{agentMode=true;addMsg('已接入人工客服，客服将为您服务',false,'handoff-notice');handoffBtn.style.display='none';}}
+      if(data.messages&&data.messages.length>0){{for(var i=0;i<data.messages.length;i++){{var m=data.messages[i];if(m.role==='agent')addMsg('客服: '+m.content,false);if(m.role==='system')addMsg(m.content,false);if(m.id>lastMsgId)lastMsgId=m.id;}}}}
+    }})
+    .catch(function(){{}});
+  }},3000);
+}}
+function stopPoll(){{if(pollTimer){{clearInterval(pollTimer);pollTimer=null;}}}}
+// CSAT 满意度评价
+var csatShown=false;
+function showCsat(){{
+  if(csatShown)return;csatShown=true;
+  var sid=getSid();if(!sid)return;
+  var stars=['','⭐','⭐⭐','⭐⭐⭐','⭐⭐⭐⭐','⭐⭐⭐⭐⭐'];
+  var m=el('div','msg bot');var b=el('div','bubble');b.style.border='1px solid #e6a23c';b.style.background='#fffbe6';
+  b.innerHTML='<div style="font-weight:600;margin-bottom:6px">请为我们的人工服务评分</div><div style="font-size:20px;letter-spacing:2px;cursor:pointer" id="openask-csat">'+stars.join('')+'</div>';
+  m.appendChild(b);msgs.appendChild(m);msgs.scrollTop=msgs.scrollHeight;
+  var csatEl=b.querySelector('#openask-csat');
+  csatEl.addEventListener('click',function(e){{
+    var idx=Array.prototype.indexOf.call(csatEl.children,e.target||csatEl.firstChild)+1;
+    submitCsat(idx);csatEl.innerHTML='感谢您的评价！';
+  }});
+}}
+function submitCsat(rating){{
+  var sid=getSid();if(!sid)return;
+  fetch(base+'/api/feedback/csat',{{
+    method:'POST',headers:{{'Content-Type':'application/json','X-API-Key':key}},
+    body:JSON.stringify({{conversation_id:sid,rating:rating,tags:[],feedback:''}})
+  }}).catch(function(){{}});
+}}
+// 页面加载时检查已有对话状态
+(function(){{
+  var sid=getSid();if(!sid)return;
+  fetch(base+'/api/chat/poll?conversation_id='+sid+'&since_id=0',{{headers:{{'X-API-Key':key}}}})
+  .then(function(r){{if(!r.ok)throw new Error();return r.json();}})
+  .then(function(data){{
+    if(data.status==='agent'){{agentMode=true;handoffBtn.style.display='none';addMsg('已接入人工客服，客服将为您服务',false,'handoff-notice');startWs();}}
+    if(data.messages&&data.messages.length>0){{for(var i=0;i<data.messages.length;i++){{var m=data.messages[i];if(m.role==='agent')addMsg('客服: '+m.content,false);if(m.id>lastMsgId)lastMsgId=m.id;}}startWs();}}
+  }})
+  .catch(function(){{}});
+}})();
 var _abort=null;
 function sendMsg(){{
   var text=inp.value.trim();if(!text||send.disabled)return;
   inp.value='';addMsg(text,true);send.disabled=true;inp.disabled=true;
+  lastQuery=text;
+  if(agentMode){{
+    var sid=getSid();
+    fetch(base+'/api/chat/message',{{method:'POST',headers:{{'Content-Type':'application/json','X-API-Key':key}},body:JSON.stringify({{conversation_id:sid,content:text}})}})
+    .then(function(){{}}).catch(function(){{addMsg('发送失败，请重试',false,'handoff-notice');}})
+    .finally(function(){{send.disabled=false;inp.disabled=false;inp.focus();}});
+    return;
+  }}
   var thinking=el('div','msg bot');var tb=el('div','bubble');tb.textContent='•••';tb.style.fontSize='18px';thinking.appendChild(tb);msgs.appendChild(thinking);msgs.scrollTop=msgs.scrollHeight;
   if(_abort)_abort.abort();
   _abort=new AbortController();
@@ -144,19 +263,13 @@ function sendMsg(){{
   .then(function(data){{
     clearTimeout(timer);msgs.removeChild(thinking);
     addMsg(data.answer||'（无回答）',false);
-    // 保存 conversation_id 用于续传
     if(data.conversation_id){{setSid(data.conversation_id);}}
-    // 显示转人工按钮
-    if(data.handoff_suggested){{var hb=document.createElement('span');hb.className='handoff-btn';hb.textContent='未能解决？转人工';hb.addEventListener('click',function(){{var contact=prompt('请输入联系方式（邮箱或手机号），客服将联系你：');if(contact&&contact.trim()){{fetch(base+'/api/projects/'+pid+'/handoff',{{method:'POST',headers:{{'Content-Type':'application/json','X-API-Key':key}},body:JSON.stringify({{conversation_id:data.conversation_id,query:text,contact_email:contact}})}}).then(function(){{addMsg('转接请求已提交，客服将尽快联系你',false);}}).catch(function(){{addMsg('提交失败，请稍后重试',false);}});}}}});msgs.lastChild.querySelector('.bubble').after(hb);}}
+    if(data.handoff_suggested){{var hb=document.createElement('span');hb.className='handoff-btn';hb.textContent='未能解决？转人工';hb.addEventListener('click',function(){{submitHandoff('AI未能解决，用户主动转接');}});msgs.lastChild.querySelector('.bubble').after(hb);}}
   }})
   .catch(function(err){{
     clearTimeout(timer);msgs.removeChild(thinking);
     if(err.name==='AbortError'){{addMsg('请求超时，请重试',false);}}
     else{{addMsg('服务暂时不可用，请稍后重试',false);}}
-    var retry=document.createElement('span');retry.className='retry-btn';retry.textContent='重试';
-    retry.addEventListener('click',function(){{inp.value=text;send.disabled=false;inp.disabled=false;sendMsg();}});
-    msgs.lastChild.querySelector('.bubble').appendChild(retry);
-    msgs.scrollTop=msgs.scrollHeight;
   }})
   .finally(function(){{send.disabled=false;inp.disabled=false;inp.focus();}});
 }}

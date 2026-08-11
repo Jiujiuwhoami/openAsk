@@ -24,7 +24,8 @@
 import asyncio
 import signal
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timezone
+from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.responses import JSONResponse
@@ -38,6 +39,9 @@ from src.utils.dynamic_limiter import project_limiter
 from src.services.plan_service import PlanService
 from src.services.project_service import ProjectService
 
+from src.api.agent import router as agent_router
+from src.api.canned_responses import router as canned_router
+from src.api.ws import router as ws_router
 from src.api.routes import router
 from src.api.auth import router as auth_router
 from src.api.projects import router as projects_router
@@ -66,6 +70,7 @@ from src.infrastructure.reranker import create_reranker
 from src.infrastructure.zvec_store import ZvecStore
 from src.services.knowledge_service import KnowledgeService
 from src.services.sensenova_client import SenseNovaClient
+from src.services.ws_manager import get_manager
 from src.utils.config import settings
 from src.utils.logger import get_logger
 
@@ -74,6 +79,82 @@ logger = get_logger(__name__)
 _shutdown_event = asyncio.Event()
 _request_count = 0
 _request_count_lock = asyncio.Lock()
+_queue_monitor_task: Optional[asyncio.Task] = None
+
+
+async def _queue_monitor_loop():
+    """排队监控任务：定期检查并升级超时未处理的转接请求，清理心跳超时的客服。
+
+    每 60 秒执行一次：
+    1. 升级等待超时的转接请求（默认 300 秒）
+    2. 清理心跳超时的客服（默认 120 秒）
+    """
+    from src.services.analytics_service import AnalyticsService
+    from src.services.agent_service import AgentService
+
+    logger.info("排队监控任务已启动")
+    analytics = AnalyticsService()
+    agent_service = AgentService()
+
+    while not _shutdown_event.is_set():
+        try:
+            # 1. 升级超时转接请求
+            escalated = analytics.escalate_stale_handoffs(timeout_seconds=300)
+            if escalated:
+                logger.info(f"排队监控: 升级了 {len(escalated)} 个转接请求")
+
+            # 2. 清理心跳超时客服
+            cleaned = agent_service.cleanup_stale_agents(timeout_seconds=120)
+            if cleaned:
+                logger.info(f"排队监控: 清理了 {cleaned} 个超时客服")
+
+            # 3. 自动分配：尝试将 pending 转接分配给空闲在线客服
+            await _assign_pending_from_queue(analytics, agent_service)
+
+        except Exception as e:
+            logger.warning(f"排队监控异常: {e}")
+        await asyncio.sleep(60)
+
+
+async def _assign_pending_from_queue(analytics, agent_service):
+    """从待处理队列中自动分配转接请求。
+
+    扫描所有有 pending handoff 的项目，尝试分配给可用客服。
+    """
+    from src.services.conversation_service import ConversationService
+
+    conv_service = ConversationService()
+
+    # 获取所有项目的 pending 请求（简化处理：扫描全部项目）
+    # 通过 analytics 直接查询所有项目的 pending 请求
+    pending_by_project = analytics._get_connection().execute(
+        "SELECT DISTINCT project_id FROM handoff_requests WHERE status = 'pending'"
+    ).fetchall()
+
+    for row in pending_by_project:
+        pid = row["project_id"]
+        try:
+            handoffs = analytics.list_handoffs(pid, status="pending", page=1, page_size=1)
+            if not handoffs["items"]:
+                continue
+            handoff = handoffs["items"][0]
+            conv_id = handoff.get("conversation_id", "")
+            if not conv_id:
+                continue
+
+            available = agent_service.get_available_agent(pid, strategy="round_robin")
+            if not available:
+                continue
+
+            conv_service.update_status(conv_id, "agent", available["user_id"])
+            analytics.resolve_handoff(handoff["id"])
+            agent_service.increment_load(available["user_id"])
+            logger.info(f"队列自动分配: handoff={handoff['id']}, agent={available['user_id'][:12]}")
+
+            from src.api.ws import notify_conversation_status
+            await notify_conversation_status(conv_id, "agent", available["user_id"])
+        except Exception as e:
+            logger.warning(f"队列自动分配失败: project={pid}, err={e}")
 
 
 def create_llm_client() -> LLMClient:
@@ -192,8 +273,31 @@ async def lifespan(app: FastAPI):
         app.state.reranker = reranker
         app.state.knowledge_service = knowledge_service
 
+        # 启动 WebSocket 管理器
+        ws_manager = get_manager()
+        await ws_manager.start()
+        logger.info("WebSocket ConnectionManager 已启动")
+
+        # 启动排队监控任务
+        global _queue_monitor_task
+        _queue_monitor_task = asyncio.create_task(_queue_monitor_loop())
+        logger.info("排队监控任务已启动")
+
         logger.info("所有组件初始化完成")
         yield
+
+        # 停止排队监控任务
+        if _queue_monitor_task:
+            _queue_monitor_task.cancel()
+            try:
+                await _queue_monitor_task
+            except asyncio.CancelledError:
+                pass
+            logger.info("排队监控任务已停止")
+
+        # 停止 WebSocket 管理器
+        await ws_manager.stop()
+        logger.info("WebSocket ConnectionManager 已停止")
     except Exception as e:
         logger.error(f"组件初始化失败: {e}", exc_info=True)
         raise
@@ -363,6 +467,9 @@ app.include_router(analytics_router)
 app.include_router(conversations_router)
 app.include_router(ecommerce_router)
 app.include_router(admin_router)
+app.include_router(agent_router)
+app.include_router(canned_router)
+app.include_router(ws_router)
 app.include_router(router)
 
 

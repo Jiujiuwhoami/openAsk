@@ -19,6 +19,7 @@ from src.infrastructure.interfaces.vector_store import VectorStore
 from src.infrastructure.interfaces.cache_backend import CacheBackend
 from src.infrastructure.interfaces.llm_client import LLMClient
 from src.infrastructure.interfaces.reranker import Reranker
+from src.services.handoff_judge import HandoffJudge
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -135,26 +136,25 @@ class Retriever:
             except Exception as e:
                 logger.warning(f"统计记录失败: {e}")
 
-    @staticmethod
     def _check_handoff_needed(
+        self,
         sources: List[SearchResult],
         query: str,
+        messages: Optional[List[dict]] = None,
     ) -> bool:
-        """判断是否需要建议转人工客服。
+        """多维判定是否需要建议转人工客服。
 
-        条件（任一满足即返回 True）：
-        1. 无来源文档
-        2. 所有来源的最高分 < 0.35
-        3. 查询为空
+        使用 HandoffJudge 引擎评估检索质量、重复提问、情感等多个维度。
+        替代原有的单一阈值逻辑。
         """
-        if not query.strip():
-            return True
-        if not sources:
-            return True
-        max_score = max((s.score for s in sources if s.score is not None), default=0.0)
-        if max_score < 0.35:
-            return True
-        return False
+        if not hasattr(self, "_handoff_judge"):
+            self._handoff_judge = HandoffJudge()
+        decision = self._handoff_judge.evaluate(
+            query=query,
+            sources=sources,
+            history=messages or [],
+        )
+        return decision.suggested
 
     async def retrieve(
         self,
@@ -252,7 +252,7 @@ class Retriever:
             except Exception as e:
                 logger.warning(f"重排序失败，降级为不重排序: {e}")
 
-        handoff = self._check_handoff_needed(search_results, query)
+        handoff = self._check_handoff_needed(search_results, query, messages=messages)
         answer = await self._generate_answer(
             query, search_results, system_prompt=effective_prompt,
             messages=messages, language=language,
@@ -377,7 +377,7 @@ class Retriever:
         yield {"event": "sources", "data": sources_data}
         yield {"event": "cache_hit", "data": False}
 
-        handoff = self._check_handoff_needed(search_results, query)
+        handoff = self._check_handoff_needed(search_results, query, messages=messages)
         yield {"event": "handoff_suggested", "data": handoff}
 
         effective_prompt = system_prompt or self._system_prompt

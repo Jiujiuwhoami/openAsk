@@ -38,6 +38,8 @@ from src.api.schemas import (
     HealthResponse,
     DeleteResponse,
     BatchDeleteRequest,
+    WidgetMessageRequest,
+    PollResponse,
 )
 from src.core.retriever import RetrievalResult
 from src.domain.project import Project
@@ -225,6 +227,10 @@ async def chat(
         if not conv or conv.project_id != project.project_id:
             raise HTTPException(status_code=404, detail="会话不存在")
 
+    # 人工接管守卫：会话处于 agent 模式时不走 AI 回答
+    if conv and conv.status == "agent":
+        raise HTTPException(status_code=409, detail="会话已被人工客服接管")
+
     # 获取历史消息（用于 LLM 上下文）
     # 注意：先获取历史再追加用户消息，避免 LLM 收到重复的当前查询
     llm_messages, _ = _get_messages_for_llm(
@@ -334,6 +340,17 @@ async def chat_stream(
                 headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
             )
 
+    # 人工接管守卫：会话处于 agent 模式时不走 AI 回答
+    if conv and conv.status == "agent":
+        async def agent_mode_gen():
+            yield f"data: {json.dumps({'event': 'error', 'data': '会话已被人工客服接管'}, ensure_ascii=False)}\n\n"
+            yield f"data: {json.dumps({'event': 'done', 'data': None}, ensure_ascii=False)}\n\n"
+        return StreamingResponse(
+            agent_mode_gen(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
+        )
+
     # 获取历史消息（先获取再追加，避免 LLM 收到重复的当前查询）
     llm_messages, _ = _get_messages_for_llm(
         body.query, conversation_id, body.messages
@@ -412,6 +429,55 @@ async def chat_stream(
             "X-Accel-Buffering": "no",
         },
     )
+
+
+# ------------------------------------------------------------------
+# 人工客服 — Widget 端轮询/消息（X-API-Key 鉴权）
+# ------------------------------------------------------------------
+
+
+@router.get("/chat/poll", response_model=PollResponse)
+async def widget_poll(
+    conversation_id: str = Query(..., description="会话 ID"),
+    since_id: int = Query(0, ge=0, description="上次收到的最大消息 ID"),
+    project=Depends(resolve_project),
+):
+    """Widget 轮询：获取会话状态变更和客服新消息。"""
+    conv = _conv_service.get_conversation(conversation_id)
+    if not conv or conv.project_id != project.project_id:
+        raise HTTPException(status_code=404, detail="会话不存在")
+
+    messages = _conv_service.get_messages_since(conversation_id, since_id=since_id)
+    return PollResponse(
+        status=conv.status,
+        agent_id=conv.agent_id,
+        messages=[
+            {
+                "id": m.id,
+                "role": m.role,
+                "content": m.content,
+                "message_type": m.message_type,
+                "created_at": m.created_at,
+            }
+            for m in messages
+        ],
+    )
+
+
+@router.post("/chat/message")
+async def widget_send_message(
+    body: WidgetMessageRequest,
+    project=Depends(resolve_project),
+):
+    """Widget 用户发送消息（人工模式）。仅当会话处于 agent 状态时可用。"""
+    conv = _conv_service.get_conversation(body.conversation_id)
+    if not conv or conv.project_id != project.project_id:
+        raise HTTPException(status_code=404, detail="会话不存在")
+    if conv.status != "agent":
+        raise HTTPException(status_code=409, detail="会话未被人工接管，请使用 /api/chat")
+
+    msg = _conv_service.add_message(body.conversation_id, "user", body.content)
+    return {"id": msg.id, "role": "user", "content": msg.content, "created_at": msg.created_at}
 
 
 # ------------------------------------------------------------------

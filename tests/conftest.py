@@ -19,12 +19,16 @@ import src.services.project_service as _ps
 import src.services.plan_service as _pl
 import src.services.analytics_service as _an
 import src.services.conversation_service as _cs
+import src.services.agent_service as _as
+import src.services.canned_response_service as _cr
 
 _orig_user_init = _us.UserService.__init__
 _orig_proj_init = _ps.ProjectService.__init__
 _orig_plan_init = _pl.PlanService.__init__
 _orig_analytics_init = _an.AnalyticsService.__init__
 _orig_conv_init = _cs.ConversationService.__init__
+_orig_agent_init = _as.AgentService.__init__
+_orig_canned_init = _cr.CannedResponseService.__init__
 
 # 定义补丁构造函数：未显式传 db_path 时使用临时目录
 def _patched_user_init(self, db_path=None):
@@ -42,11 +46,19 @@ def _patched_analytics_init(self, db_path=None):
 def _patched_conv_init(self, db_path=None):
     _orig_conv_init(self, db_path or os.path.join(_TEST_TMPDIR, "conversations.db"))
 
+def _patched_agent_init(self, db_path=None):
+    _orig_agent_init(self, db_path or os.path.join(_TEST_TMPDIR, "agents.db"))
+
+def _patched_canned_init(self, db_path=None):
+    _orig_canned_init(self, db_path or os.path.join(_TEST_TMPDIR, "canned.db"))
+
 _us.UserService.__init__ = _patched_user_init
 _ps.ProjectService.__init__ = _patched_proj_init
 _pl.PlanService.__init__ = _patched_plan_init
 _an.AnalyticsService.__init__ = _patched_analytics_init
 _cs.ConversationService.__init__ = _patched_conv_init
+_as.AgentService.__init__ = _patched_agent_init
+_cr.CannedResponseService.__init__ = _patched_canned_init
 
 
 def pytest_sessionfinish(session, exitstatus):

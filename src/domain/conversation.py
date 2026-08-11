@@ -14,6 +14,8 @@ class Conversation:
         title: str = "",
         status: str = "active",
         message_count: int = 0,
+        agent_id: str = "",
+        tags: Optional[list] = None,
         created_at: Optional[int] = None,
         updated_at: Optional[int] = None,
     ):
@@ -22,6 +24,8 @@ class Conversation:
         self._title = title
         self._status = status
         self._message_count = message_count
+        self._agent_id = agent_id
+        self._tags = tags or []
         now = int(time.time())
         self._created_at = created_at if created_at is not None else now
         self._updated_at = updated_at if updated_at is not None else now
@@ -47,6 +51,14 @@ class Conversation:
         return self._message_count
 
     @property
+    def agent_id(self) -> str:
+        return self._agent_id
+
+    @property
+    def tags(self) -> list:
+        return list(self._tags)
+
+    @property
     def created_at(self) -> int:
         return self._created_at
 
@@ -70,6 +82,7 @@ class Message:
         conversation_id: str,
         role: str,
         content: str,
+        message_type: str = "text",
         metadata: Optional[str] = None,
         created_at: Optional[int] = None,
     ):
@@ -77,6 +90,7 @@ class Message:
         self._conversation_id = conversation_id
         self._role = role
         self._content = content
+        self._message_type = message_type
         self._metadata = metadata
         self._created_at = created_at if created_at is not None else int(time.time())
 
@@ -95,6 +109,10 @@ class Message:
     @property
     def content(self) -> str:
         return self._content
+
+    @property
+    def message_type(self) -> str:
+        return self._message_type
 
     @property
     def metadata(self) -> Optional[str]:

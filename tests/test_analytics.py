@@ -247,6 +247,75 @@ class TestGaps:
 # ================================================================
 
 
+class TestCsat:
+    """CSAT 满意度评价测试。"""
+
+    def test_record_csat(self, service):
+        req_id = service.record_csat(
+            conversation_id="conv_1", project_id="proj_1", rating=5,
+            tags=["解决了我问题", "回复很快"], feedback="非常满意",
+        )
+        assert req_id > 0
+
+    def test_csat_stats_empty(self, service):
+        stats = service.get_csat_stats("proj_empty")
+        assert stats["total"] == 0
+
+    def test_csat_stats(self, service):
+        service.record_csat("conv_1", "proj_1", 5)
+        service.record_csat("conv_2", "proj_1", 4)
+        service.record_csat("conv_3", "proj_1", 2)
+
+        stats = service.get_csat_stats("proj_1")
+        assert stats["total"] == 3
+        assert stats["avg_rating"] > 0
+
+    def test_csat_distribution(self, service):
+        service.record_csat("conv_1", "proj_1", 5)
+        service.record_csat("conv_2", "proj_1", 5)
+        service.record_csat("conv_3", "proj_1", 1)
+
+        dist = service.get_csat_distribution("proj_1")
+        total = sum(d["count"] for d in dist)
+        assert total == 3
+
+    def test_list_csat(self, service):
+        service.record_csat("conv_1", "proj_1", 5, agent_id="agent_1", feedback="好")
+        result = service.list_csat("proj_1")
+        assert result["total"] == 1
+        assert result["items"][0]["rating"] == 5
+        assert result["items"][0]["agent_id"] == "agent_1"
+
+
+class TestAgentPerformance:
+    """客服绩效统计测试。"""
+
+    def test_empty(self, service):
+        result = service.get_agent_performance("proj_empty")
+        assert result["total"] == 0
+
+    def test_with_data(self, service):
+        # 创建会话并指派给 agent
+        from src.services.conversation_service import ConversationService
+        conv_service = ConversationService()
+        conv = conv_service.create_conversation("proj_agent", "测试")
+        conv_service.update_status(conv.conversation_id, "agent", "agent_1")
+        conv_service.add_message(conv.conversation_id, "agent", "客服回复1")
+        conv_service.add_message(conv.conversation_id, "agent", "客服回复2")
+
+        # 记录 CSAT
+        service.record_csat(conv.conversation_id, "proj_agent", 5, agent_id="agent_1")
+
+        result = service.get_agent_performance("proj_agent")
+        assert result["total"] >= 1
+        agent = result["items"][0]
+        assert agent["agent_id"] == "agent_1"
+        assert agent["conversations"] >= 1
+        assert agent["messages_sent"] >= 2
+        assert agent["csat_total"] >= 1
+        assert agent["csat_avg"] > 0
+
+
 class TestFeedback:
     def test_record_feedback(self, service):
         """记录反馈。"""

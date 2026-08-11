@@ -30,12 +30,21 @@ class PromptBuilder:
                 "2. **Paraphrase in your own words** — avoid copying large passages verbatim\n"
                 "3. **Cite sources** — mark the document index at the end of sentences, e.g. [Source 1][Source 3]\n"
                 "4. **Ignore irrelevant content** — if a reference document is unrelated to the question, skip it\n"
-                "5. **Be honest when unable to answer** — if the references contain no useful information, "
+                "5. **Questions unrelated to the references** — if the user asks about you yourself "
+                "(who/what you are, your capabilities) or general knowledge, answer directly from your own "
+                "knowledge and note that the references do not contain this information\n"
+                "6. **Cite accurately** — only add [Source N] for information actually taken from the "
+                "references; never cite sources for information from your own knowledge or common sense\n"
+                "7. **Be honest when unable to answer** — if the references contain no useful information, "
                 "tell the user directly that no relevant information was found\n"
-                "6. **Response style** — natural, clear, conversational. Use paragraphs for structure "
+                "8. **Response style** — natural, clear, conversational. Use paragraphs for structure "
                 "but avoid mechanical lists\n"
-                "7. **Appropriate length** — cover the topic concisely without unnecessary detail\n"
-                "8. **Answer in English** — always respond in English"
+                "9. **Appropriate length** — cover the topic concisely without unnecessary detail\n"
+                "10. **Answer in English** — always respond in English\n"
+                "11. **Skip reasoning** — do not output your chain-of-thought or reasoning process. "
+                "Answer the user directly.\n"
+                "12. **Thinking process (if any)** — if you produce internal reasoning, express it in "
+                "complete, coherent sentences; avoid fragmented words or sentences"
             )
         # 默认中文指令
         return (
@@ -45,9 +54,13 @@ class PromptBuilder:
             "2. **必须用自己的话重述**，禁止直接复制参考资料原文大段粘贴\n"
             "3. **标注来源**：引用参考资料时在句末标注对应的文档编号，如 [来源1][来源3]\n"
             "4. **忽略无关内容**：如果某篇参考资料与问题无关，忽略它，不要强行纳入回答\n"
-            "5. **无法回答时坦诚相告**：如果参考资料中完全没有可用的信息，直接告诉用户找不到相关信息，不要强行编造答案\n"
-            "6. **回答风格**：自然、清晰的口语化表达，像在跟用户对话一样。适当分段让结构清晰，但不要机械罗列\n"
-            "7. **篇幅适中**：根据问题的复杂度，回答长度控制在能说清楚即可，不要过度展开无关细节"
+            "5. **问题与参考资料无关时**：如果问题询问的是助手自身信息（如你是什么、你是谁、你的能力等）或通用常识问题，请直接根据你自己的知识如实回答，并明确说明参考资料中不包含相关信息\n"
+            "6. **来源标注要准确**：只有确实来自参考资料的信息才能标注 [来源N]；来自自身知识或常识的信息绝对不要添加来源标注\n"
+            "7. **无法回答时坦诚相告**：如果参考资料中完全没有可用的信息，直接告诉用户找不到相关信息，不要强行编造答案\n"
+            "8. **回答风格**：自然、清晰的口语化表达，像在跟用户对话一样。适当分段让结构清晰，但不要机械罗列\n"
+            "9. **篇幅适中**：根据问题的复杂度，回答长度控制在能说清楚即可，不要过度展开无关细节\n"
+            "10. **不要输出推理过程**：直接回答用户问题，不要在回答前展示你的分析思路或思考过程\n"
+            "11. **思考过程（如模型会输出）**：如产生内部思考，请用完整、连贯的句子表达，保持逻辑清晰，不要输出碎片化的词语或残缺句子"
         )
 
     @classmethod
@@ -361,10 +374,11 @@ class SenseNovaClient(LLMClient):
                 *messages,
                 {"role": "user", "content": query},
             ]
+            # 推理模型（如 DeepSeek-R1）会输出长思考过程，加大 max_tokens 避免回答被截断
             payload = {
                 "model": self._model,
                 "messages": full_messages,
-                "max_tokens": 2048,
+                "max_tokens": 4096,
                 "temperature": 0.7,
                 "stream": True,
             }
@@ -376,7 +390,7 @@ class SenseNovaClient(LLMClient):
             payload = {
                 "model": self._model,
                 "messages": [{"role": "user", "content": prompt}],
-                "max_tokens": 2048,
+                "max_tokens": 4096,
                 "temperature": 0.7,
                 "stream": True,
             }

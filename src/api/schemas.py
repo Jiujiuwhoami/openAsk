@@ -152,3 +152,24 @@ class BatchDeleteRequest(BaseModel):
     """批量删除请求。"""
 
     doc_ids: List[str] = Field(..., description="文档 ID 列表", min_length=1)
+
+
+class AgentMessageRequest(BaseModel):
+    """客服发送消息请求。"""
+
+    content: str = Field(..., description="客服消息内容", min_length=1, max_length=5000)
+
+
+class WidgetMessageRequest(BaseModel):
+    """Widget 用户发送消息请求（人工模式）。"""
+
+    conversation_id: str = Field(..., description="会话 ID")
+    content: str = Field(..., description="消息内容", min_length=1, max_length=2000)
+
+
+class PollResponse(BaseModel):
+    """轮询新消息响应。"""
+
+    status: str = Field(..., description="会话状态: active/agent")
+    agent_id: str = Field("", description="接管客服的用户 ID")
+    messages: list = Field(..., description="新消息列表")

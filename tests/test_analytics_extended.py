@@ -157,3 +157,137 @@ class TestHandoff:
         assert item["status"] == "pending"
         assert item["created_at"] > 0
         assert item["resolved_at"] == 0
+
+    def test_record_handoff_with_reason_priority(self, service):
+        """record_handoff 支持 reason 和 priority 参数。"""
+        req_id = service.record_handoff(
+            project_id="proj_1",
+            query="加急问题",
+            conversation_id="conv_x",
+            reason="user_initiated",
+            priority=2,
+        )
+        assert req_id > 0
+        result = service.list_handoffs("proj_1")
+        item = result["items"][0]
+        assert item["reason"] == "user_initiated"
+        assert item["priority"] == 2
+
+    def test_record_handoff_reason_default(self, service):
+        """未传 reason 时默认为 user_initiated。"""
+        req_id = service.record_handoff("proj_1", "普通问题")
+        result = service.list_handoffs("proj_1")
+        item = result["items"][0]
+        assert item["reason"] == "user_initiated"
+        assert item["priority"] == 0
+
+    def test_queue_position_first(self, service):
+        """第一个转接请求排在 0 位。"""
+        req_id = service.record_handoff("proj_q", "问题1")
+        info = service.get_queue_position("proj_q", req_id)
+        assert info["position"] == 0
+        assert info["estimated_wait_seconds"] == 0
+
+    def test_queue_position_after_requests(self, service):
+        """后续转接请求排队位置递增。"""
+        service.record_handoff("proj_q", "问题1")
+        service.record_handoff("proj_q", "问题2")
+        req_id = service.record_handoff("proj_q", "问题3")
+        info = service.get_queue_position("proj_q", req_id)
+        assert info["position"] == 2
+        assert info["estimated_wait_seconds"] == 120
+
+    def test_queue_position_ignores_other_projects(self, service):
+        """不同项目的转接请求互不影响排队位置。"""
+        service.record_handoff("proj_other", "别的问题")
+        req_id = service.record_handoff("proj_q", "问题")
+        info = service.get_queue_position("proj_q", req_id)
+        assert info["position"] == 0
+
+    def test_queue_position_not_found(self, service):
+        info = service.get_queue_position("proj_q", 99999)
+        assert info["position"] == 0
+        assert info["estimated_wait_seconds"] == 0
+
+    def test_queue_position_after_resolve(self, service):
+        """已解决的请求不计入排队位置。"""
+        id1 = service.record_handoff("proj_q", "问题1")
+        service.resolve_handoff(id1)
+        req_id = service.record_handoff("proj_q", "问题2")
+        info = service.get_queue_position("proj_q", req_id)
+        assert info["position"] == 0
+
+    def test_cancel_handoff(self, service):
+        """取消转接请求：pending → closed。"""
+        req_id = service.record_handoff("proj_c", "问题", conversation_id="conv_1")
+        cancelled = service.cancel_handoff("conv_1")
+        assert cancelled is True
+        result = service.list_handoffs("proj_c")
+        assert result["items"][0]["status"] == "closed"
+
+    def test_cancel_handoff_resolved_returns_false(self, service):
+        """已解决的请求无法取消。"""
+        req_id = service.record_handoff("proj_c", "问题", conversation_id="conv_1")
+        service.resolve_handoff(req_id)
+        cancelled = service.cancel_handoff("conv_1")
+        assert cancelled is False
+
+    def test_cancel_handoff_no_match(self, service):
+        """不存在的会话取消返回 False。"""
+        cancelled = service.cancel_handoff("conv_404")
+        assert cancelled is False
+
+    def test_escalate_stale_handoffs(self, service):
+        """升级超时转接请求。"""
+        import time
+        # 插入一个旧的 pending 请求
+        conn = service._get_connection()
+        old = int(time.time()) - 600  # 10 分钟前
+        conn.execute(
+            "INSERT INTO handoff_requests (project_id, conversation_id, query, status, created_at) VALUES (?, ?, ?, 'pending', ?)",
+            ("proj_esc", "conv_1", "旧问题", old),
+        )
+        conn.commit()
+        conn.close()
+
+        # 升级超时（300秒）
+        escalated = service.escalate_stale_handoffs(timeout_seconds=300)
+        assert len(escalated) == 1
+
+        # 验证已被升级
+        result = service.list_handoffs("proj_esc")
+        assert result["items"][0]["priority"] >= 1
+
+    def test_escalate_stale_recent_not_escalated(self, service):
+        """最近的请求不被升级。"""
+        import time
+        conn = service._get_connection()
+        now = int(time.time())
+        conn.execute(
+            "INSERT INTO handoff_requests (project_id, conversation_id, query, status, created_at) VALUES (?, ?, ?, 'pending', ?)",
+            ("proj_esc", "conv_2", "新问题", now),
+        )
+        conn.commit()
+        conn.close()
+
+        escalated = service.escalate_stale_handoffs(timeout_seconds=300)
+        assert len(escalated) == 0
+
+    def test_escalate_stale_project_filter(self, service):
+        """指定项目筛选升级。"""
+        import time
+        conn = service._get_connection()
+        old = int(time.time()) - 600
+        conn.execute(
+            "INSERT INTO handoff_requests (project_id, conversation_id, query, status, created_at) VALUES (?, ?, ?, 'pending', ?)",
+            ("proj_esc_a", "conv_1", "问题A", old),
+        )
+        conn.execute(
+            "INSERT INTO handoff_requests (project_id, conversation_id, query, status, created_at) VALUES (?, ?, ?, 'pending', ?)",
+            ("proj_esc_b", "conv_2", "问题B", old),
+        )
+        conn.commit()
+        conn.close()
+
+        escalated = service.escalate_stale_handoffs("proj_esc_a", timeout_seconds=300)
+        assert len(escalated) == 1

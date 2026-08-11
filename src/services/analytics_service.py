@@ -52,6 +52,20 @@ CREATE TABLE IF NOT EXISTS feedback (
 );
 CREATE INDEX IF NOT EXISTS idx_feedback_project ON feedback(project_id);
 
+CREATE TABLE IF NOT EXISTS csat_ratings (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    conversation_id TEXT NOT NULL,
+    project_id TEXT NOT NULL,
+    agent_id TEXT DEFAULT '',
+    rating INTEGER NOT NULL CHECK(rating BETWEEN 1 AND 5),
+    tags TEXT DEFAULT '[]',
+    feedback TEXT DEFAULT '',
+    created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_csat_project ON csat_ratings(project_id);
+CREATE INDEX IF NOT EXISTS idx_csat_agent ON csat_ratings(agent_id);
+CREATE INDEX IF NOT EXISTS idx_csat_conv ON csat_ratings(conversation_id);
+
 CREATE TABLE IF NOT EXISTS handoff_requests (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     project_id TEXT NOT NULL,
@@ -60,6 +74,8 @@ CREATE TABLE IF NOT EXISTS handoff_requests (
     contact_email TEXT DEFAULT '',
     contact_phone TEXT DEFAULT '',
     note TEXT DEFAULT '',
+    reason TEXT DEFAULT 'user_initiated',
+    priority INTEGER NOT NULL DEFAULT 0,
     status TEXT NOT NULL DEFAULT 'pending',
     created_at INTEGER NOT NULL,
     resolved_at INTEGER DEFAULT 0
@@ -103,6 +119,15 @@ class AnalyticsService:
             conn.execute("CREATE INDEX IF NOT EXISTS idx_chat_logs_conv ON chat_logs(conversation_id)")
         except Exception:
             pass
+
+        # handoff_requests 表迁移：reason / priority 列（兼容旧库）
+        hcols = {r["name"] for r in conn.execute("PRAGMA table_info(handoff_requests)").fetchall()}
+        if "reason" not in hcols:
+            conn.execute("ALTER TABLE handoff_requests ADD COLUMN reason TEXT DEFAULT 'user_initiated'")
+            logger.info("handoff_requests 表迁移：新增 reason 列")
+        if "priority" not in hcols:
+            conn.execute("ALTER TABLE handoff_requests ADD COLUMN priority INTEGER DEFAULT 0")
+            logger.info("handoff_requests 表迁移：新增 priority 列")
 
     def _get_connection(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self._db_path)
@@ -174,7 +199,7 @@ class AnalyticsService:
         start_date: Optional[int] = None,
         end_date: Optional[int] = None,
     ) -> dict:
-        """分页查询问答日志。"""
+        """分页查询问答日志（含当前反馈评分）。"""
         conditions = ["project_id = ?"]
         params = [project_id]
 
@@ -198,8 +223,16 @@ class AnalyticsService:
             ).fetchone()
             total = count_row["cnt"] if count_row else 0
 
+            # 关联 feedback 子查询，取每条日志的最新评分
             rows = conn.execute(
-                f"SELECT * FROM chat_logs WHERE {where} ORDER BY created_at DESC LIMIT ? OFFSET ?",
+                f"""SELECT cl.*,
+                           (SELECT rating FROM feedback
+                            WHERE log_id = cl.id
+                            ORDER BY created_at DESC LIMIT 1) AS feedback
+                    FROM chat_logs cl
+                    WHERE {where}
+                    ORDER BY cl.created_at DESC
+                    LIMIT ? OFFSET ?""",
                 params + [page_size, offset],
             ).fetchall()
 
@@ -217,6 +250,7 @@ class AnalyticsService:
                     "prompt_tokens": r["prompt_tokens"],
                     "completion_tokens": r["completion_tokens"],
                     "created_at": r["created_at"],
+                    "feedback": r["feedback"],  # 'good' | 'bad' | None
                 })
 
             return {"items": items, "total": total, "page": page, "page_size": page_size}
@@ -404,11 +438,12 @@ class AnalyticsService:
     # ================================================================
 
     def record_feedback(self, log_id: int, project_id: str, rating: str) -> None:
-        """记录用户反馈。"""
+        """记录/更新用户反馈（同一日志只保留最新评分）。"""
         now = int(datetime.now(timezone.utc).timestamp())
         with self._lock:
             conn = self._get_connection()
             try:
+                conn.execute("DELETE FROM feedback WHERE log_id = ?", (log_id,))
                 conn.execute(
                     "INSERT INTO feedback (log_id, project_id, rating, created_at) VALUES (?, ?, ?, ?)",
                     (log_id, project_id, rating, now),
@@ -540,6 +575,182 @@ class AnalyticsService:
             conn.close()
 
     # ================================================================
+    # CSAT 满意度评价
+    # ================================================================
+
+    def record_csat(
+        self,
+        conversation_id: str,
+        project_id: str,
+        rating: int,
+        agent_id: str = "",
+        tags: Optional[List[str]] = None,
+        feedback: str = "",
+    ) -> int:
+        """记录一次 CSAT 满意度评价。返回记录 ID。"""
+        now = int(datetime.now(timezone.utc).timestamp())
+        tags_json = json.dumps(tags or [], ensure_ascii=False)
+        with self._lock:
+            conn = self._get_connection()
+            try:
+                cur = conn.execute(
+                    """INSERT INTO csat_ratings (conversation_id, project_id, agent_id, rating, tags, feedback, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    (conversation_id, project_id, agent_id, rating, tags_json, feedback, now),
+                )
+                conn.commit()
+                return cur.lastrowid
+            finally:
+                conn.close()
+
+    def get_csat_stats(self, project_id: str, days: int = 30) -> dict:
+        """获取 CSAT 统计。"""
+        since = int(datetime.now(timezone.utc).timestamp()) - days * 86400
+        conn = self._get_connection()
+        try:
+            row = conn.execute(
+                """SELECT
+                          COUNT(*) as total,
+                          AVG(rating) as avg_rating,
+                          SUM(CASE WHEN rating >= 4 THEN 1 ELSE 0 END) as positive,
+                          SUM(CASE WHEN rating <= 2 THEN 1 ELSE 0 END) as negative
+                   FROM csat_ratings
+                   WHERE project_id = ? AND created_at >= ?""",
+                (project_id, since),
+            ).fetchone()
+
+            if not row or row["total"] == 0:
+                return {"total": 0, "avg_rating": 0.0, "positive_rate": 0.0, "negative_rate": 0.0}
+
+            total = row["total"]
+            return {
+                "total": total,
+                "avg_rating": round(row["avg_rating"] or 0, 2),
+                "positive_rate": round((row["positive"] or 0) / total * 100, 1),
+                "negative_rate": round((row["negative"] or 0) / total * 100, 1),
+            }
+        finally:
+            conn.close()
+
+    def get_csat_distribution(self, project_id: str, days: int = 30) -> List[dict]:
+        """获取评分分布。"""
+        since = int(datetime.now(timezone.utc).timestamp()) - days * 86400
+        conn = self._get_connection()
+        try:
+            rows = conn.execute(
+                """SELECT rating, COUNT(*) as cnt FROM csat_ratings
+                WHERE project_id = ? AND created_at >= ?
+                GROUP BY rating ORDER BY rating DESC""",
+                (project_id, since),
+            ).fetchall()
+            return [{"rating": r["rating"], "count": r["cnt"]} for r in rows]
+        finally:
+            conn.close()
+
+    def list_csat(self, project_id: str, page: int = 1, page_size: int = 20) -> dict:
+        """分页列出 CSAT 评价。"""
+        offset = (page - 1) * page_size
+        conn = self._get_connection()
+        try:
+            count = conn.execute(
+                "SELECT COUNT(*) as cnt FROM csat_ratings WHERE project_id = ?", (project_id,)
+            ).fetchone()["cnt"]
+            rows = conn.execute(
+                "SELECT * FROM csat_ratings WHERE project_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?",
+                (project_id, page_size, offset),
+            ).fetchall()
+            items = [
+                {
+                    "id": r["id"],
+                    "conversation_id": r["conversation_id"],
+                    "project_id": r["project_id"],
+                    "agent_id": r["agent_id"],
+                    "rating": r["rating"],
+                    "tags": json.loads(r["tags"]) if r["tags"] else [],
+                    "feedback": r["feedback"],
+                    "created_at": r["created_at"],
+                }
+                for r in rows
+            ]
+            return {"items": items, "total": count, "page": page, "page_size": page_size}
+        finally:
+            conn.close()
+
+    # ================================================================
+    # 客服工作台统计
+    # ================================================================
+
+    def get_agent_performance(self, project_id: str, days: int = 30) -> dict:
+        """获取客服维度绩效统计。
+
+        统计指标：
+        - conversations: 处理的会话数
+        - messages_sent: 发送的消息数
+        - csat_total / csat_avg: 满意度
+        - total_assigned: 累计接单数（来自 agent_status）
+        """
+        since = int(datetime.now(timezone.utc).timestamp()) - days * 86400
+
+        # 1. 从 ConversationService 获取会话统计
+        from src.services.conversation_service import ConversationService
+        conv_service = ConversationService()
+        conv_list = conv_service.list_conversations(project_id, page=1, page_size=10000)
+        agent_conv_count = {}
+        agent_msg_count = {}
+        for c in conv_list.get("items", []):
+            agent_id = c.get("agent_id", "")
+            if not agent_id:
+                continue
+            agent_conv_count[agent_id] = agent_conv_count.get(agent_id, 0) + 1
+
+        # 2. 统计客服消息数（通过会话 service）
+        for c in conv_list.get("items", []):
+            agent_id = c.get("agent_id", "")
+            if not agent_id:
+                continue
+            msgs = conv_service.get_messages_by_conversation(c["conversation_id"], page=1, page_size=500)
+            agent_count = sum(1 for m in msgs.get("items", []) if m.get("role") == "agent" and m.get("created_at", 0) >= since)
+            agent_msg_count[agent_id] = agent_msg_count.get(agent_id, 0) + agent_count
+
+        # 3. CSAT 统计（来自 analytics 自身数据库）
+        conn = self._get_connection()
+        try:
+            csat_rows = conn.execute(
+                """SELECT agent_id, COUNT(*) as cnt, AVG(rating) as avg_r
+                FROM csat_ratings WHERE project_id = ? AND created_at >= ?
+                GROUP BY agent_id""",
+                (project_id, since),
+            ).fetchall()
+        finally:
+            conn.close()
+        csat_by_agent = {
+            r["agent_id"]: {"total": r["cnt"], "avg": round(r["avg_r"] or 0, 2)}
+            for r in csat_rows if r["agent_id"]
+        }
+
+        # 4. agent_status 中的累计接单数
+        from src.services.agent_service import AgentService
+        agent_status = AgentService().list_project_agents(project_id)
+        status_by_agent = {a["user_id"]: a for a in agent_status}
+
+        # 合并统计
+        agent_ids = set(list(agent_conv_count.keys()) + list(agent_msg_count.keys()) + list(csat_by_agent.keys()) + list(status_by_agent.keys()))
+        items = []
+        for agent_id in sorted(agent_ids):
+            status = status_by_agent.get(agent_id)
+            items.append({
+                "agent_id": agent_id,
+                "conversations": agent_conv_count.get(agent_id, 0),
+                "messages_sent": agent_msg_count.get(agent_id, 0),
+                "csat_total": csat_by_agent.get(agent_id, {}).get("total", 0),
+                "csat_avg": csat_by_agent.get(agent_id, {}).get("avg", 0),
+                "total_assigned": status["total_assigned"] if status else 0,
+                "current_load": status["current_load"] if status else 0,
+                "status": status["status"] if status else "offline",
+            })
+        return {"items": items, "total": len(items), "days": days}
+
+    # ================================================================
     # 人工客服转接
     # ================================================================
 
@@ -551,6 +762,8 @@ class AnalyticsService:
         contact_email: str = "",
         contact_phone: str = "",
         note: str = "",
+        reason: str = "user_initiated",
+        priority: int = 0,
     ) -> int:
         """记录人工客服转接请求。返回请求 ID。"""
         now = int(datetime.now(timezone.utc).timestamp())
@@ -559,9 +772,9 @@ class AnalyticsService:
             try:
                 cur = conn.execute(
                     """INSERT INTO handoff_requests
-                    (project_id, conversation_id, query, contact_email, contact_phone, note, status, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)""",
-                    (project_id, conversation_id, query, contact_email, contact_phone, note, now),
+                    (project_id, conversation_id, query, contact_email, contact_phone, note, reason, priority, status, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)""",
+                    (project_id, conversation_id, query, contact_email, contact_phone, note, reason, priority, now),
                 )
                 conn.commit()
                 return cur.lastrowid
@@ -608,6 +821,8 @@ class AnalyticsService:
                     "contact_email": r["contact_email"],
                     "contact_phone": r["contact_phone"],
                     "note": r["note"],
+                    "reason": r["reason"] if "reason" in r.keys() else "user_initiated",
+                    "priority": r["priority"] if "priority" in r.keys() else 0,
                     "status": r["status"],
                     "created_at": r["created_at"],
                     "resolved_at": r["resolved_at"],
@@ -629,5 +844,103 @@ class AnalyticsService:
                 )
                 conn.commit()
                 return cur.rowcount > 0
+            finally:
+                conn.close()
+
+    def get_queue_position(self, project_id: str, handoff_id: int) -> dict:
+        """获取转接请求的排队位置和预计等待时间。
+
+        排队位置 = 同一项目中 status='pending' 且 id 更小的请求数。
+        预计等待 = 位置 * 平均处理时间（默认 60s/人）。
+        """
+        with self._lock:
+            conn = self._get_connection()
+            try:
+                # 获取当前请求的创建时间
+                row = conn.execute(
+                    "SELECT created_at FROM handoff_requests WHERE id = ? AND project_id = ?",
+                    (handoff_id, project_id),
+                ).fetchone()
+                if not row:
+                    return {"position": 0, "estimated_wait_seconds": 0}
+
+                # 统计同一项目中 status='pending' 且 id 更小的请求数
+                pos = conn.execute(
+                    """SELECT COUNT(*) as cnt FROM handoff_requests
+                    WHERE project_id = ? AND status = 'pending' AND id < ?""",
+                    (project_id, handoff_id),
+                ).fetchone()
+                position = pos["cnt"] if pos else 0
+                # 预计等待 = 位置 * 平均处理时间（60s）
+                estimated = position * 60
+                return {"position": position, "estimated_wait_seconds": estimated}
+            finally:
+                conn.close()
+
+    def escalate_stale_handoffs(self, project_id: str = "", timeout_seconds: int = 300) -> List[int]:
+        """升级超时未处理的转接请求。
+
+        将等待超过 timeout_seconds 的 pending 请求标记为 priority >= 1（高优先级），
+        并返回被升级的请求 ID 列表，供上层通知。
+        """
+        cutoff = int(datetime.now(timezone.utc).timestamp()) - timeout_seconds
+        conditions = ["status = 'pending'", "created_at < ?", "priority < 1"]
+        params = [cutoff]
+        if project_id:
+            conditions.append("project_id = ?")
+            params.append(project_id)
+
+        where = " AND ".join(conditions)
+        with self._lock:
+            conn = self._get_connection()
+            try:
+                rows = conn.execute(
+                    f"SELECT id FROM handoff_requests WHERE {where}", params
+                ).fetchall()
+                ids = [r["id"] for r in rows]
+                if ids:
+                    placeholders = ",".join("?" * len(ids))
+                    conn.execute(
+                        f"UPDATE handoff_requests SET priority = 1, note = "
+                        f"CASE WHEN note = '' THEN '排队超时自动升级' ELSE note || '；排队超时自动升级' END "
+                        f"WHERE id IN ({placeholders})",
+                        ids,
+                    )
+                    conn.commit()
+                    logger.info(f"排队超时升级: {len(ids)} 个转接请求已升级")
+                return ids
+            finally:
+                conn.close()
+
+    def cancel_handoff(self, conversation_id: str) -> bool:
+        """取消指定会话的待处理转接请求。返回是否取消了。"""
+        with self._lock:
+            conn = self._get_connection()
+            try:
+                cur = conn.execute(
+                    "UPDATE handoff_requests SET status = 'closed' WHERE conversation_id = ? AND status = 'pending'",
+                    (conversation_id,),
+                )
+                conn.commit()
+                return cur.rowcount > 0
+            finally:
+                conn.close()
+
+    def resolve_handoffs_by_conversation(self, project_id: str, conversation_id: str) -> int:
+        """解决指定对话的所有待处理转接请求。返回解决的条数。
+
+        客服接管对话时调用，避免同一个对话残留多个 pending 请求。
+        """
+        now = int(datetime.now(timezone.utc).timestamp())
+        with self._lock:
+            conn = self._get_connection()
+            try:
+                cur = conn.execute(
+                    """UPDATE handoff_requests SET status = 'resolved', resolved_at = ?
+                    WHERE project_id = ? AND conversation_id = ? AND status = 'pending'""",
+                    (now, project_id, conversation_id),
+                )
+                conn.commit()
+                return cur.rowcount
             finally:
                 conn.close()
